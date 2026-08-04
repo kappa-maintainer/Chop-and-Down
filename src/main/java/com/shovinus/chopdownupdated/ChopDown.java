@@ -35,9 +35,9 @@ guiFactory = "com.shovinus.chopdownupdated.config.GuiConfigFactoryChopDown")
 public class ChopDown {
 	ExecutorService executor;
 
-	public static final String MODID = "chopdownupdated";
-	public static final String MODNAME = "ChopDownUpdated";
-	public static final String VERSION = "@VERSION@";
+	public static final String MODID = Reference.MOD_ID;
+	public static final String MODNAME = Reference.MOD_NAME;
+	public static final String VERSION = Reference.VERSION;
 	public static final String AUTHOR = "Shovinus";/*
 													 * Original Idea by Ternsip,however the mod does not really resemble
 													 * that in any way other that the turning of blocks in to falling

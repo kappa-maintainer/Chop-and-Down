@@ -340,7 +340,7 @@ public class Tree implements Runnable {
 		try {
 			ResourceLocation loc = stack.getItem().getRegistryName();
 			int damageValue = stack.getItem().getDamage(stack);
-			return loc.getResourceDomain() + ":" + loc.getResourcePath() + ":" + String.valueOf(damageValue);
+			return loc.getNamespace() + ":" + loc.getPath() + ":" + String.valueOf(damageValue);
 		} catch (Exception ex) {
 			return "";
 		}
