@@ -70,18 +70,6 @@ public class ChopDown {
 		World world = event.getWorld();
 		BlockPos pos = event.getPos();
 
-		// TEMP DEBUG: log every broken block and the chop-down checks
-		String debugBlockName = Tree.blockName(pos, world);
-		TreeConfiguration debugConfig = Tree.findConfig(world, pos);
-		boolean debugTrunk = debugConfig != null && Tree.isTrunk(pos, world, debugConfig);
-		boolean debugWoodAbove = Tree.isWood(pos.add(0, 1, 0), world);
-		String debugTool = event.getPlayer().getHeldItemMainhand() == null ? "null"
-				: Tree.stackName(event.getPlayer().getHeldItemMainhand());
-		System.out.println("[ChopDown-DEBUG] broke=" + debugBlockName + " isWood=" + Tree.isWood(pos, world)
-				+ " config=" + (debugConfig == null ? "null" : "found") + " isTrunk=" + debugTrunk
-				+ " woodAbove=" + debugWoodAbove + " tool=" + debugTool + " player="
-				+ event.getPlayer().getClass().getName());
-
 		if (!Tree.isWood(pos, world)
 				|| !ArrayUtils.contains(Config.allowedPlayers, event.getPlayer().getClass().getName())) {
 			return;
@@ -97,13 +85,27 @@ public class ChopDown {
 			return;
 		}
 
-		// Check to see if this player has already started a tree chop event.
+		// Check to see if this player has already started a tree chop event. Trees that
+		// failed to build (e.g. the chop layer is not cut through enough for the
+		// configured cut ratio) are removed on the next tick; they must not block the
+		// player from breaking more logs, or fast consecutive breaks would be
+		// cancelled while the failed tree is still in the list. Trees that are still
+		// being analysed on the calculation thread must not block either: the running
+		// BFS will see the newly broken blocks, so we just skip creating another tree.
+		Tree activeTree = null;
 		for (Tree tree : FallingTrees) {
-			if (tree.player == event.getPlayer()) {
-				event.getPlayer().sendMessage(new TextComponentString("Still chopping down the last tree"));
-				event.setCanceled(true);
+			if (tree.player == event.getPlayer() && !tree.failedToBuild) {
+				activeTree = tree;
+				break;
+			}
+		}
+		if (activeTree != null) {
+			if (!activeTree.finishedCalculation) {
 				return;
 			}
+			event.getPlayer().sendMessage(new TextComponentString("Still chopping down the last tree"));
+			event.setCanceled(true);
+			return;
 		}
 		//Initialise the tree and add it to the list, get the executor to start chopping it down;;
 		Tree tree;

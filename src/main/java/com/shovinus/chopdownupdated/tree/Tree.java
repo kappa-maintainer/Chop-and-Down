@@ -29,11 +29,13 @@ import net.minecraft.util.EnumFacing;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.text.TextComponentString;
 import net.minecraft.world.World;
 
 public class Tree implements Runnable {
 
 	BlockPos base;
+	BlockPos treeCenter;
 	public World world;
 	public EntityPlayer player;
 	Boolean main = false;
@@ -163,6 +165,26 @@ public class Tree implements Runnable {
 	 * through
 	 */
 	private void getPossibleTree() throws Exception {
+		boolean ratioCheckNeeded = false;
+		boolean quickRatioChecked = false;
+		HashMap<Integer, Integer> layerLogs = new HashMap<>();
+		// Radius checks are centered on the trunk (the average of the log positions
+		// in the layer above the chop point) instead of the chop point itself, so a
+		// chop point near one side of a thick trunk does not cut the canopy off
+		// asymmetrically
+		int centerX = 0, centerZ = 0, centerCount = 0;
+		int cr = config.Trunk_Radius();
+		for (int qx = -cr; qx <= cr; qx++) {
+			for (int qz = -cr; qz <= cr; qz++) {
+				if (isLog(base.add(qx, 1, qz))) {
+					centerX += base.getX() + qx;
+					centerZ += base.getZ() + qz;
+					centerCount++;
+				}
+			}
+		}
+		treeCenter = centerCount > 0 ? new BlockPos(centerX / centerCount, base.getY(), centerZ / centerCount)
+				: base;
         while (!queue.isEmpty()) {
             BlockPos blockStep = queue.poll();
             for (int dy = -1; dy <= 1; ++dy) {
@@ -193,15 +215,13 @@ public class Tree implements Runnable {
                         // leafStep reached, nor if radius limit reaches, nor if this block is our main
                         // block
                         if (inspectPos.compareTo(base) == 0 || y < base.getY() || leafStep >= leafLimit
-                                || horizontalDistanceSquared(base, inspectPos) > radius * radius) {
+                                || horizontalDistanceSquared(treeCenter, inspectPos) > radius * radius) {
                             continue;
                         }
                         // If not directly connected to the tree search down for a base
                         if (log && (leafStep > 0 || dy < 0) && !estimatedTree.containsKey(inspectPos) && isTrunk
-                                && (Math.abs(inspectPos.getX() - base.getX()) > config.Trunk_Radius()
-                                        || Math.abs(inspectPos.getZ() - base.getZ()) > config.Trunk_Radius())
-
-                        ) {
+                                && (Math.abs(inspectPos.getX() - treeCenter.getX()) > config.Trunk_Radius()
+                                        || Math.abs(inspectPos.getZ() - treeCenter.getZ()) > config.Trunk_Radius())) {
                             // Its the trunk of another tree, check to see if we already have this tree in
                             // the list, or add it.
                             if (main) {
@@ -223,6 +243,7 @@ public class Tree implements Runnable {
 										+ " (other tree not cut through)");
 								estimatedTree.clear();
 								queue.clear();
+								failedToBuild = true;
 								return;
 							}
 
@@ -237,14 +258,59 @@ public class Tree implements Runnable {
                          */
 							if (main && log && ((cantDrag(inspectPos) && !yMatch)
 									|| (yMatch && logAbove && !wentUp)) && leafStep == 0) {
-								System.out.println("[ChopDown-DEBUG] tree build aborted at " + inspectPos
-										+ (cantDrag(inspectPos) && !yMatch ? " (blocked by solid block)"
-												: " (log not cut through at chop level)"));
-								estimatedTree.clear();
-								queue.clear();
-								return;
+								if (yMatch && logAbove && !wentUp && !cantDrag(inspectPos)
+										&& config.Min_cut_ratio() > 0.0) {
+									// Partial cut: keep the remaining pillar in the tree and decide
+									// whether the chop layer is cut through enough after the BFS
+									ratioCheckNeeded = true;
+									// Quick pre-check on the first hit: counting the chop layer and the
+									// layer above avoids running the full BFS (which takes seconds on
+									// huge trees) when the cut is obviously not deep enough
+									if (!quickRatioChecked) {
+										quickRatioChecked = true;
+										int quickR = 0;
+										int quickT = 0;
+										int qr = config.Trunk_Radius();
+										for (int qx = -qr; qx <= qr; qx++) {
+											for (int qz = -qr; qz <= qr; qz++) {
+												if (isLog(base.add(qx, 0, qz))) {
+													quickR++;
+												}
+												if (isLog(base.add(qx, 1, qz))) {
+													quickT++;
+												}
+											}
+										}
+										// Only trust the layer above as a reference layer when it still
+										// holds at least as many logs as the chop layer; otherwise fall
+										// through to the exact check after the full BFS
+										if (quickT >= quickR && quickR > (int) Math.floor(quickT * (1.0 - config.Min_cut_ratio()))) {
+											System.out.println("[ChopDown-DEBUG] tree build aborted (quick partial cut: " + quickR
+													+ " of " + quickT + " logs at chop layer, allowed "
+													+ (int) Math.floor(quickT * (1.0 - config.Min_cut_ratio())) + ")");
+											estimatedTree.clear();
+											queue.clear();
+											failedToBuild = true;
+											return;
+										}
+									}
+								} else {
+									System.out.println("[ChopDown-DEBUG] tree build aborted at " + inspectPos
+											+ (cantDrag(inspectPos) && !yMatch ? " (blocked by solid block)"
+													: " (log not cut through at chop level)"));
+									if (cantDrag(inspectPos) && !yMatch) {
+										sendBlockedMessage();
+									}
+									estimatedTree.clear();
+									queue.clear();
+									failedToBuild = true;
+									return;
+								}
 							}
                         if (!yMatch || !cantDrag(inspectPos)) {
+							if (log && !estimatedTree.containsKey(inspectPos)) {
+								layerLogs.merge(inspectPos.getY(), 1, Integer::sum);
+							}
                             addEstimateBlock(inspectPos, leafStep);
                         } else {
                             continue;
@@ -253,6 +319,27 @@ public class Tree implements Runnable {
                 }
             }
         }
+
+		if (ratioCheckNeeded) {
+			int baseCount = layerLogs.getOrDefault(base.getY(), 0);
+			int maxCount = 0;
+			for (int count : layerLogs.values()) {
+				if (count > maxCount) {
+					maxCount = count;
+				}
+			}
+			int allowed = (int) Math.floor(maxCount * (1.0 - config.Min_cut_ratio()));
+			if (baseCount > allowed) {
+				System.out.println("[ChopDown-DEBUG] tree build aborted (partial cut: " + baseCount
+						+ " of " + maxCount + " logs still at chop layer, allowed " + allowed + ")");
+				estimatedTree.clear();
+				queue.clear();
+				failedToBuild = true;
+				return;
+			}
+			System.out.println("[ChopDown-DEBUG] partial cut accepted: " + baseCount + " of " + maxCount
+					+ " logs still at chop layer (allowed " + allowed + ")");
+		}
 
     }
 
@@ -360,7 +447,7 @@ public class Tree implements Runnable {
 			BlockPos from = estimatedTreeQueue.pollFirst();
 			boolean mine = true;
 			int leafStep = estimatedTree.get(from);
-			int distance = horizontalDistanceSquared(base, from);
+			int distance = horizontalDistanceSquared(treeCenter, from);
 			if (distance > config.Radius() * config.Radius() || leafStep >= config.Leaf_limit()) {
 				continue;
 			}
@@ -436,6 +523,24 @@ public class Tree implements Runnable {
 			return false;
 		}
 		return true;
+	}
+
+	private static long lastBlockedMessageTime = 0;
+
+	/*
+	 * Tell the player why the tree cannot be felled when it is stuck against a
+	 * solid block. Throttled to avoid chat spam on consecutive breaks. Runs on the
+	 * calculation thread, so the message is scheduled on the server thread.
+	 */
+	private void sendBlockedMessage() {
+		long now = System.currentTimeMillis();
+		if (now - lastBlockedMessageTime < 2000 || player == null
+				|| world.getMinecraftServer() == null) {
+			return;
+		}
+		lastBlockedMessageTime = now;
+		world.getMinecraftServer().addScheduledTask(() -> player
+				.sendMessage(new TextComponentString("Tree is blocked by a solid block")));
 	}
 
 	/*

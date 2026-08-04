@@ -32,10 +32,21 @@ public class TreeConfiguration {
 		return min_vertical_logs;
 	}
 
+	/*
+	 * The ratio of the chop layer that must be cut through before the tree can
+	 * fall. 0 disables the partial cut check (the whole layer must be cut).
+	 * Defaults to 0.6 for thick trunks (trunk_radius > 1), 0 for thin trunks.
+	 * A value of 1.0 restores the vanilla behaviour of cutting the whole layer.
+	 */
+	public double Min_cut_ratio() {
+		return min_cut_ratio == null ? (trunk_radius > 1 ? 0.6 : 0.0) : min_cut_ratio;
+	}
+
 	private int radius = 9;
 	private int leaf_limit = 12;
 	private int trunk_radius = 1;
 	private int min_vertical_logs = 0;
+	private Double min_cut_ratio;
 	private List<String> logs;
 	private List<String> leaves;
 	private transient String[] leaves_merged;
@@ -64,6 +75,15 @@ public class TreeConfiguration {
 	}
 	public TreeConfiguration setLeaves(String... leaves) {
 		this.leaves = new ArrayList<String>(Arrays.asList(leaves));
+		return this;
+	}
+
+	/*
+	 * Set the partial cut ratio. Only written to the built in json configs of
+	 * thick trunks (trunk_radius > 1); thin trunks keep the whole layer rule.
+	 */
+	public TreeConfiguration setMinCutRatio(double ratio) {
+		this.min_cut_ratio = ratio;
 		return this;
 	}
 
@@ -133,7 +153,9 @@ public class TreeConfiguration {
 		leaves_merged = null;
 	}
 	public TreeConfiguration Clone() {
-		return new TreeConfiguration(radius, leaf_limit, min_vertical_logs, trunk_radius,
+		TreeConfiguration clone = new TreeConfiguration(radius, leaf_limit, min_vertical_logs, trunk_radius,
 				Config.ConvertListToArray(Logs()), Config.ConvertListToArray(LeavesList()));
+		clone.min_cut_ratio = this.min_cut_ratio;
+		return clone;
 	}
 }
