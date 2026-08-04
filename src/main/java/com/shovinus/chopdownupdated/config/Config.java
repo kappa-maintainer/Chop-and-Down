@@ -5,11 +5,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.UUID;
-import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.ArrayUtils;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 import com.shovinus.chopdownupdated.ChopDown;
 
 import net.minecraft.entity.player.EntityPlayerMP;
@@ -32,7 +32,7 @@ public class Config {
 	public static String[] ignoreTools;
 
 	public static HashMap<UUID, PersonalConfig> playerConfigs = new HashMap<UUID, PersonalConfig>();
-	public static TreeConfiguration[] treeConfigurations;
+	public static TreeConfiguration[] treeConfigurations = new TreeConfiguration[0];
 
 	public static String[] leaves;
 	public static String[] logs;
@@ -54,7 +54,7 @@ public class Config {
 
 	public static Configuration config;
 
-	public static void load(FMLPreInitializationEvent event) throws Exception {
+	public static void load(FMLPreInitializationEvent event) {
 		config = new Configuration(event.getSuggestedConfigurationFile(), ChopDown.VERSION);
 		if (!config.getDefinedConfigVersion().equals(config.getLoadedConfigVersion())) {
 			event.getSuggestedConfigurationFile().renameTo(new File(event.getSuggestedConfigurationFile().getPath() + "_old"));
@@ -64,7 +64,7 @@ public class Config {
 		reloadConfig();
 	}
 
-	public static void reloadConfig() throws Exception {
+	public static void reloadConfig() {
 
 		maxDropsPerTickPerTree = config.getInt("maxDropsPerTickPerTree", CATEGORY, 150, 1, 1000000,
 				"Maximum number of blocks to drop per tick for each tree thats falling");
@@ -123,20 +123,25 @@ public class Config {
 				activeMods.add(mod);
 		}
 
-		//Custom configs
+		//Custom configs. A single bad custom tree JSON must not discard the other
+		// custom trees, so each entry is parsed and skipped individually.
 		String[] tempTreeConfig = config.getStringList("customTrees", MOD_CATEGORY,
 				new String[] {},
 				"Allows you to add your own custom trees, use the following google sheet to design your own trees more easily (Make a copy): http://bit.ly/treeconfig");
-		List<TreeConfiguration> tempTreeConfigurations = new ArrayList<TreeConfiguration>();
+		List<TreeConfiguration> tempTreeConfigurations = new ArrayList<>();
 		for (String treeConfig : tempTreeConfig) {
-			tempTreeConfigurations.add(new Gson().fromJson(treeConfig, TreeConfiguration.class));
+			try {
+				tempTreeConfigurations.add(new Gson().fromJson(treeConfig, TreeConfiguration.class));
+			} catch (JsonSyntaxException ex) {
+				System.out.println("ChopDown: skipping invalid custom tree config: " + treeConfig);
+			}
 		}
-		TreeConfiguration[] tempCustomTrees = tempTreeConfigurations.toArray(new TreeConfiguration[tempTreeConfigurations.size()]);
+		TreeConfiguration[] tempCustomTrees = tempTreeConfigurations.toArray(new TreeConfiguration[0]);
 		mods.setCustomTrees(tempCustomTrees);
 
-		//Merge trees
+		//Merge trees (unknown config names are skipped with a warning)
 		mods.ActivateMods(ConvertListToArray(activeMods));
-		treeConfigurations = mods.UnifiedTreeConfigs.toArray(new TreeConfiguration[mods.UnifiedTreeConfigs.size()]);
+		treeConfigurations = mods.UnifiedTreeConfigs.toArray(new TreeConfiguration[0]);
 		GenerateLeavesAndLogs();
 		config.save();
 
@@ -171,14 +176,14 @@ public class Config {
 	}
 
 	@SubscribeEvent
-	public static void onConfigChanged(ConfigChangedEvent.OnConfigChangedEvent event) throws Exception {
+	public static void onConfigChanged(ConfigChangedEvent.OnConfigChangedEvent event) {
 		if (event.getModID().equals(ChopDown.MODID)) {
 			reloadConfig();
 		}
 	}
 
 	public static String[] ConvertListToArray(List<String> list) {
-		return list.toArray(new String[list.size()]);
+		return list.toArray(new String[0]);
 	}
 
 }

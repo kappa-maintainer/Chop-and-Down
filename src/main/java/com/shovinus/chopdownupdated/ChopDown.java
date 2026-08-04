@@ -16,6 +16,7 @@ import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 
 import java.util.LinkedList;
+import java.util.Iterator;
 import java.util.concurrent.*;
 
 import org.apache.commons.lang3.ArrayUtils;
@@ -52,7 +53,7 @@ public class ChopDown {
 
 	@EventHandler
 
-	public void preinit(FMLPreInitializationEvent event) throws Exception {
+	public void preinit(FMLPreInitializationEvent event) {
 		Config.load(event);
 	}
 
@@ -110,17 +111,18 @@ public class ChopDown {
 	public void onTick(TickEvent.ServerTickEvent event) {
 		try {
 			tick++;
-			if (tick % 4 == 0) {
+			boolean throttledTick = tick % 4 == 0;
+			if (throttledTick) {
 				tick = 0;
-				for (Tree tree : FallingTrees) {
-					if (tree.finishedCalculation) {
-						if (tree.dropBlocks()) {
-							FallingTrees.remove(tree);
-						}
-					}
-					if (tree.failedToBuild) {
-						FallingTrees.remove(tree);
-					}
+			}
+			Iterator<Tree> iterator = FallingTrees.iterator();
+			while (iterator.hasNext()) {
+				Tree tree = iterator.next();
+				if (tree.failedToBuild) {
+					iterator.remove();
+				} else if (tree.finishedCalculation
+						&& (!tree.startedDropping || throttledTick) && tree.dropBlocks()) {
+					iterator.remove();
 				}
 			}
 		} catch (Exception ex) {

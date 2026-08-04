@@ -15,14 +15,15 @@ public class ModTreeConfigurations {
 		Mods.put(name, trees);
 	}
 
-	public List<TreeConfiguration> ActivateMods(String[] mods) throws Exception {
+	public List<TreeConfiguration> ActivateMods(String[] mods) {
 		UnifiedTreeConfigs.clear();
 		for (String mod : mods) {
 			if (Mods.containsKey(mod)) {
 				MergeInTrees(Mods.get(mod));
 			} else {
-				throw new Exception("This mod does not exist:" + mod
-						+ " , this should not happen in live, sorry for any inconvience, please report to mod releaser");
+				// Unknown names can appear from stale or hand edited config files.
+				// Skipping is safer than failing the whole mod load.
+				System.out.println("ChopDown: unknown tree configuration '" + mod + "' skipped");
 			}
 		}
 		if(Mods.containsKey("_Custom")) {
