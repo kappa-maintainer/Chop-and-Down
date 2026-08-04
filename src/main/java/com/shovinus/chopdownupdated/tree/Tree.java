@@ -69,6 +69,7 @@ public class Tree implements Runnable {
 	public volatile boolean finishedCalculation = false;
 	public volatile boolean failedToBuild = false;
 	public volatile boolean startedDropping = false;
+	private volatile boolean pendingLeavesBroken = false;
 
 	LinkedList<Tree> nearbyTrees = new LinkedList<Tree>();
 
@@ -216,24 +217,33 @@ public class Tree implements Runnable {
                                 }
                             }
                             continue;
-                        } else if (main && log && (leafStep > 0 || dy < 0) && !estimatedTree.containsKey(inspectPos)
-                                && isTrunk && isLog(inspectPos.add(0, 1, 0))) {
-                            estimatedTree.clear();
-                            queue.clear();
-                            return;
-                        }
+							} else if (main && log && (leafStep > 0 || dy < 0) && !estimatedTree.containsKey(inspectPos)
+									&& isTrunk && isLog(inspectPos.add(0, 1, 0)) && config.Trunk_Radius() == 1) {
+								System.out.println("[ChopDown-DEBUG] tree build aborted at " + inspectPos
+										+ " (other tree not cut through)");
+								estimatedTree.clear();
+								queue.clear();
+								return;
+							}
 
                         /*
                          * If a log but next to a solid none tree block then fail to chop (avoids 99% of
                          * cases of issues building with logs in houses)
                          * 
+                         * The yMatch check (log below the chop point that still has logs above it)
+                         * only applies to thin trunks: thick trunks (trunk radius > 1) like the
+                         * natura redwood keep other pillars standing at the chop level, so it must
+                         * not abort the chop or thick trees can never be felled
                          */
-                        if (main && log && ((cantDrag(inspectPos) && !yMatch)
-                                || (yMatch && logAbove && !wentUp)) && leafStep == 0) {
-                            estimatedTree.clear();
-                            queue.clear();
-                            return;
-                        }
+							if (main && log && ((cantDrag(inspectPos) && !yMatch)
+									|| (yMatch && logAbove && !wentUp)) && leafStep == 0) {
+								System.out.println("[ChopDown-DEBUG] tree build aborted at " + inspectPos
+										+ (cantDrag(inspectPos) && !yMatch ? " (blocked by solid block)"
+												: " (log not cut through at chop level)"));
+								estimatedTree.clear();
+								queue.clear();
+								return;
+							}
                         if (!yMatch || !cantDrag(inspectPos)) {
                             addEstimateBlock(inspectPos, leafStep);
                         } else {
@@ -382,7 +392,6 @@ public class Tree implements Runnable {
 		pushLogsThroughPendingLeaves();
 		fallingBlocksList = new LinkedList<>(fallingBlocks.keySet());
 		fallingBlocksList.sort(new AxisComparer(DirectionSort.UP));
-		breakStackedPendingLeaves();
 	}
 
 	@Override
@@ -391,6 +400,7 @@ public class Tree implements Runnable {
 			this.getDropBlocks();
 		} catch (Exception e) {
 			this.failedToBuild = true;
+			System.out.println("[ChopDown-DEBUG] tree calculation failed: " + e);
 		}
 	}
 
@@ -399,6 +409,13 @@ public class Tree implements Runnable {
 	 */
 	public boolean dropBlocks() {
 		startedDropping = true;
+		// breakStackedPendingLeaves touches the world (dropDrops spawns items,
+		// setBlockState writes blocks), so it must run on the server thread, not on
+		// the calculation thread that builds the tree
+		if (!pendingLeavesBroken) {
+			pendingLeavesBroken = true;
+			breakStackedPendingLeaves();
+		}
 		int blocksRemaining = Config.maxDropsPerTickPerTree;
 		BlockPos pos;
 		int size = fallingBlocksList.size();
@@ -542,7 +559,7 @@ public class Tree implements Runnable {
 				// Use falling entities
 				clearLeafLandingPath(pair);
 				EntityFallingBlock fallingBlock = new EntityFallingBlock(world, pair.to.getX() + 0.5,
-						pair.to.getY() + 0.5, pair.to.getZ() + 0.5, state, pair.tile, !pair.leaves);
+						pair.to.getY() + 0.5, pair.to.getZ() + 0.5, state, pair.getTile(), !pair.leaves);
 				fallingBlock.setEntityBoundingBox(new AxisAlignedBB(pair.to.add(0, 0, 0), pair.to.add(1, 1, 1)));
 				fallingBlock.fallTime = 1;
 				world.spawnEntity(fallingBlock);
@@ -721,6 +738,7 @@ public class Tree implements Runnable {
 	public static final Boolean isTrunk(BlockPos pos, World world, TreeConfiguration config) {
 
 		// Normal tree check, requires the tree to be sat on a solid block
+		BlockPos choppedPos = pos;
 		boolean log = true;
 		while (log) {
 			pos = pos.add(0, -1, 0);
@@ -735,17 +753,20 @@ public class Tree implements Runnable {
 		if (config.Min_vertical_logs() == 0) {
 			return false;
 		} else {
-			// Instead check for at least 4 vertical log blocks above and below
+			// Count the continuous vertical log run around the chopped position.
+			// Counting from the chopped position (not from the first non log block
+			// below it) keeps the check working when the blocks below the chop point
+			// were already removed.
 			int below = 0;
 			for (int i = 1; i < config.Min_vertical_logs(); i++) {
-				if (!config.isLog(blockName(pos.add(0, -i, 0), world))) {
+				if (!config.isLog(blockName(choppedPos.add(0, -i, 0), world))) {
 					break;
 				}
 				below++;
 			}
 			int above = 0;
 			for (int i = 1; i < config.Min_vertical_logs(); i++) {
-				if (!config.isLog(blockName(pos.add(0, i, 0), world))) {
+				if (!config.isLog(blockName(choppedPos.add(0, i, 0), world))) {
 					break;
 				}
 				above++;
@@ -763,6 +784,7 @@ public class Tree implements Runnable {
 	}
 
 	private boolean calculateIsTrunk(BlockPos pos) {
+		BlockPos choppedPos = pos;
 		boolean log = true;
 		BlockPos inspect = pos;
 		while (log) {
@@ -780,14 +802,14 @@ public class Tree implements Runnable {
 		} else {
 			int below = 0;
 			for (int i = 1; i < config.Min_vertical_logs(); i++) {
-				if (!isLog(pos.add(0, -i, 0))) {
+				if (!isLog(choppedPos.add(0, -i, 0))) {
 					break;
 				}
 				below++;
 			}
 			int above = 0;
 			for (int i = 1; i < config.Min_vertical_logs(); i++) {
-				if (!isLog(pos.add(0, i, 0))) {
+				if (!isLog(choppedPos.add(0, i, 0))) {
 					break;
 				}
 				above++;

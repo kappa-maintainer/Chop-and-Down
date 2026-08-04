@@ -1,6 +1,10 @@
 package com.shovinus.chopdownupdated.config;
 
 import java.io.File;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.Writer;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -9,11 +13,14 @@ import java.util.UUID;
 import org.apache.commons.lang3.ArrayUtils;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonSyntaxException;
 import com.shovinus.chopdownupdated.ChopDown;
 
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraftforge.common.config.ConfigCategory;
 import net.minecraftforge.common.config.Configuration;
+import net.minecraftforge.fml.common.Loader;
 import net.minecraftforge.fml.client.event.ConfigChangedEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
@@ -84,67 +91,145 @@ public class Config {
 		ignoreTools = config.getStringList("ignoreTools", CATEGORY, new String[] { "tconstruct:lumberaxe:.*" },
 				"List of tools to ignore chop down on, such as tinkers lumberaxe, any tool that veinmines or similar should be ignored for chopdown");
 
-		//Predefined tree configs for mods
-		List<String> activeMods = new ArrayList<String>();
-		if (config.getBoolean("Vanilla", MOD_CATEGORY, true, "Vanilla"))
-			activeMods.add("Vanilla");
-		String[] availableMods = { 
-				"AbyssalCraft",
-				"AetherLegacy",
-				"BetterWithAddons",
-				"BiomesOPlenty",
-				"Cuisine",
-				"DefiledLands",
-				"ExtraTrees",
-				"Forestry",
-				"IndustrialCraft2",				
-				"IntegratedDynamics",
-				"JurassiCraft", 
-				"Natura",
-				"NaturalPledge",
-				"PamsHarvestCraft",
-				"Plants",
-				"PrimalCore", 
-				"Rustic",
-				"SugiForest",
-				"Terra",
-				"Terraqueous",
-				"Thaumcraft",
-				"TheBetweenLands",
-				"TheErebus", 
-				"TheMidnight", 
-				"TheTwilightForest",
-				"Traverse",
-				"Treasure2",
-				"Tropicraft",
-				"VibrantJourneys" };
-		for (String mod : availableMods) {
-			if (config.getBoolean(mod, MOD_CATEGORY, false, mod))
-				activeMods.add(mod);
-		}
+		//Enabled tree config files. Built in mod configs (mod id) are created with
+		// their built in defaults on first use. Any other entry is loaded as a
+		// player made json file from the same directory, so custom trees are
+		// configured exactly the same way as mod trees.
+		String[] enabledTreeConfigs = config.getStringList("enabledTreeConfigs", MOD_CATEGORY,
+				DEFAULT_ENABLED_TREE_CONFIGS,
+				"List of tree configuration files to enable. Built in mod configs use the mod id (e.g. 'minecraft', 'biomesoplenty') and are created "
+						+ "with built in defaults on first use. Custom tree files are plain json files you create yourself in "
+						+ "config/chopdownupdated/, list the file name without the .json extension to enable them. "
+						+ "All files can be edited by hand, delete a built in file to restore its defaults.");
+		cleanupLegacyConfigKeys();
 
-		//Custom configs. A single bad custom tree JSON must not discard the other
-		// custom trees, so each entry is parsed and skipped individually.
-		String[] tempTreeConfig = config.getStringList("customTrees", MOD_CATEGORY,
-				new String[] {},
-				"Allows you to add your own custom trees, use the following google sheet to design your own trees more easily (Make a copy): http://bit.ly/treeconfig");
-		List<TreeConfiguration> tempTreeConfigurations = new ArrayList<>();
-		for (String treeConfig : tempTreeConfig) {
-			try {
-				tempTreeConfigurations.add(new Gson().fromJson(treeConfig, TreeConfiguration.class));
-			} catch (JsonSyntaxException ex) {
-				System.out.println("ChopDown: skipping invalid custom tree config: " + treeConfig);
+		//Load the enabled tree config files (creating missing built in files from
+		// the defaults) and merge them together
+		mods.clear();
+		List<TreeConfiguration> mergedTrees = new ArrayList<>();
+		for (String entry : enabledTreeConfigs) {
+			if (entry.isEmpty()) {
+				continue;
+			}
+			String registrationName = mods.findRegistrationName(entry);
+			String modId = registrationName != null ? mods.getModId(registrationName) : null;
+			if (modId != null && !Loader.isModLoaded(modId)) {
+				// The mod is not installed, skip its config without creating a file
+				continue;
+			}
+			File configFile = getTreeConfigFile(registrationName != null ? modId : entry);
+			if (registrationName != null) {
+				if (!configFile.exists()) {
+					writeTreeConfigFile(configFile, mods.getTrees(registrationName));
+				}
+				TreeConfiguration[] loaded = loadTreeConfigFile(configFile);
+				if (loaded.length == 0) {
+					// Empty or unreadable file, fall back to the built in defaults
+					// without overwriting the players file
+					loaded = mods.getTrees(registrationName);
+				}
+				for (TreeConfiguration tree : loaded) {
+					mergedTrees.add(tree);
+				}
+			} else if (configFile.exists()) {
+				TreeConfiguration[] loaded = loadTreeConfigFile(configFile);
+				for (TreeConfiguration tree : loaded) {
+					mergedTrees.add(tree);
+				}
+			} else {
+				System.out.println("ChopDown: tree config '" + entry + "' not found in "
+						+ getTreeConfigDir().getPath() + ", skipped");
 			}
 		}
-		TreeConfiguration[] tempCustomTrees = tempTreeConfigurations.toArray(new TreeConfiguration[0]);
-		mods.setCustomTrees(tempCustomTrees);
-
-		//Merge trees (unknown config names are skipped with a warning)
-		mods.ActivateMods(ConvertListToArray(activeMods));
+		mods.mergeTrees(mergedTrees.toArray(new TreeConfiguration[0]));
 		treeConfigurations = mods.UnifiedTreeConfigs.toArray(new TreeConfiguration[0]);
 		GenerateLeavesAndLogs();
 		config.save();
 
+	}
+
+	/*
+	 * Built in tree configs, all enabled by default. Config files are plain data
+	 * so enabling a mod that is not installed has no effect.
+	 */
+	private static final String[] DEFAULT_ENABLED_TREE_CONFIGS = { "minecraft", "abyssalcraft",
+			"aether_legacy", "betterwithaddons", "biomesoplenty", "cuisine", "defiledlands", "extratrees",
+			"forestry", "ic2", "integrateddynamics", "jurassicraft", "natura", "naturalpledge",
+			"harvestcraft", "plants2", "primal", "rustic", "sugiforest", "terra", "terraqueous",
+			"thaumcraft", "thebetweenlands", "erebus", "midnight", "twilightforest", "traverse",
+			"treasure2", "tropicraft", "pvj" };
+
+	/*
+	 * The directory that holds one json tree config per mod
+	 */
+	private static File getTreeConfigDir() {
+		return new File(config.getConfigFile().getParentFile(), ChopDown.MODID);
+	}
+
+	private static File getTreeConfigFile(String modId) {
+		return new File(getTreeConfigDir(), modId + ".json");
+	}
+
+	/*
+	 * Load a tree config json, returns an empty array when the file is missing,
+	 * empty or unreadable
+	 */
+	private static TreeConfiguration[] loadTreeConfigFile(File file) {
+		if (!file.exists()) {
+			return new TreeConfiguration[0];
+		}
+		try {
+			TreeConfiguration[] loaded = new Gson().fromJson(new FileReader(file), TreeConfiguration[].class);
+			if (loaded == null || loaded.length == 0) {
+				System.out.println("ChopDown: empty tree config " + file.getName() + ", using built in defaults");
+				return new TreeConfiguration[0];
+			}
+			return loaded;
+		} catch (JsonSyntaxException | IOException ex) {
+			System.out.println("ChopDown: invalid tree config " + file.getName() + ", using built in defaults");
+			return new TreeConfiguration[0];
+		}
+	}
+
+	/*
+	 * Write a tree config json with pretty printing
+	 */
+	private static void writeTreeConfigFile(File file, TreeConfiguration[] trees) {
+		try {
+			file.getParentFile().mkdirs();
+			Gson gson = new GsonBuilder().setPrettyPrinting().create();
+			try (Writer writer = new FileWriter(file)) {
+				gson.toJson(trees, writer);
+			}
+		} catch (IOException ex) {
+			System.out.println("ChopDown: could not write tree config " + file.getName());
+		}
+	}
+
+	/*
+	 * Remove the old per mod boolean toggles and the old customTrees string list
+	 * from the config file so the config GUI does not show dead entries. Values
+	 * are intentionally not migrated, the enabledTreeConfigs list replaces them.
+	 */
+	private static final String[] LEGACY_MOD_TOGGLES = { "Vanilla", "AbyssalCraft", "AetherLegacy",
+			"BetterWithAddons", "BiomesOPlenty", "Cuisine", "DefiledLands", "ExtraTrees", "Forestry",
+			"IndustrialCraft2", "IntegratedDynamics", "JurassiCraft", "Natura", "NaturalPledge",
+			"PamsHarvestCraft", "Plants", "PrimalCore", "Rustic", "SugiForest", "Terra", "Terraqueous",
+			"Thaumcraft", "TheBetweenLands", "TheErebus", "TheMidnight", "TheTwilightForest", "Traverse",
+			"Treasure2", "Tropicraft", "VibrantJourneys" };
+
+	private static void cleanupLegacyConfigKeys() {
+		ConfigCategory category = config.getCategory(MOD_CATEGORY);
+		for (String key : LEGACY_MOD_TOGGLES) {
+			if (category.containsKey(key)) {
+				category.remove(key);
+			}
+		}
+		if (category.containsKey("customTrees")) {
+			category.remove("customTrees");
+			System.out.println("ChopDown: the customTrees list moved to config/chopdownupdated/, move your entries "
+					+ "in to a json file there and add it to enabledTreeConfigs");
+		}
 	}
 
 	public static boolean MatchesTool(String name) {

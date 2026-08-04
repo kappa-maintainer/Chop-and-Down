@@ -38,8 +38,8 @@ public class TreeConfiguration {
 	private int min_vertical_logs = 0;
 	private List<String> logs;
 	private List<String> leaves;
-	private String[] leaves_merged;
-	private String[] blocks = null;
+	private transient String[] leaves_merged;
+	private transient String[] blocks = null;
 
 	public TreeConfiguration() {
 	}
@@ -68,7 +68,7 @@ public class TreeConfiguration {
 	}
 
 	public boolean isLog(String name) {
-		for (String block : logs) {
+		for (String block : Logs()) {
 			if (block.equals(name) || name.matches(block)) {
 				return true;
 			}
@@ -85,40 +85,55 @@ public class TreeConfiguration {
 		return false;
 	}
 
+	/*
+	 * Logs and leaves may be missing after Gson deserialization (players editing
+	 * the json files), lazily default them to empty lists so the config never
+	 * crashes on a null list
+	 */
 	public List<String> Logs() {
+		if (logs == null) {
+			logs = new ArrayList<String>();
+		}
 		return logs;
+	}
+
+	private List<String> LeavesList() {
+		if (leaves == null) {
+			leaves = new ArrayList<String>();
+		}
+		return leaves;
 	}
 
 	//Gets all leaves after merging the shared leaves (beehives etc)
 	public String[] Leaves() {
 		if (leaves_merged == null) {
-			leaves_merged = Config.MergeArray(Config.ConvertListToArray(leaves), Config.sharedLeaves);
+			leaves_merged = Config.MergeArray(Config.ConvertListToArray(LeavesList()), Config.sharedLeaves);
 		}
 		return leaves_merged;
 	}
 	//Gets all blocks associated with this tree
 	public String[] Blocks() {
 		if (blocks == null) {
-			blocks =ArrayUtils.addAll(Config.ConvertListToArray(logs), Leaves());
+			blocks = ArrayUtils.addAll(Config.ConvertListToArray(Logs()), Leaves());
 		}
 		return blocks;
 	}
 
 	public void Merge(TreeConfiguration newTree) {
-		// TODO Auto-generated method stub
 		for (String log : newTree.Logs()) {
-			if (!logs.contains(log)) {
+			if (!Logs().contains(log)) {
 				logs.add(log);
 			}
 		}
 		for (String leaf : newTree.Leaves()) {
-			if (!leaves.contains(leaf)) {
+			if (!LeavesList().contains(leaf)) {
 				leaves.add(leaf);
 			}
 		}
 		leaves_merged = null;
 	}
 	public TreeConfiguration Clone() {
-		return new TreeConfiguration(radius,leaf_limit,min_vertical_logs,trunk_radius,Config.ConvertListToArray(logs),Config.ConvertListToArray(leaves));
+		return new TreeConfiguration(radius, leaf_limit, min_vertical_logs, trunk_radius,
+				Config.ConvertListToArray(Logs()), Config.ConvertListToArray(LeavesList()));
 	}
 }

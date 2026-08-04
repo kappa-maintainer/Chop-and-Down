@@ -70,6 +70,18 @@ public class ChopDown {
 		World world = event.getWorld();
 		BlockPos pos = event.getPos();
 
+		// TEMP DEBUG: log every broken block and the chop-down checks
+		String debugBlockName = Tree.blockName(pos, world);
+		TreeConfiguration debugConfig = Tree.findConfig(world, pos);
+		boolean debugTrunk = debugConfig != null && Tree.isTrunk(pos, world, debugConfig);
+		boolean debugWoodAbove = Tree.isWood(pos.add(0, 1, 0), world);
+		String debugTool = event.getPlayer().getHeldItemMainhand() == null ? "null"
+				: Tree.stackName(event.getPlayer().getHeldItemMainhand());
+		System.out.println("[ChopDown-DEBUG] broke=" + debugBlockName + " isWood=" + Tree.isWood(pos, world)
+				+ " config=" + (debugConfig == null ? "null" : "found") + " isTrunk=" + debugTrunk
+				+ " woodAbove=" + debugWoodAbove + " tool=" + debugTool + " player="
+				+ event.getPlayer().getClass().getName());
+
 		if (!Tree.isWood(pos, world)
 				|| !ArrayUtils.contains(Config.allowedPlayers, event.getPlayer().getClass().getName())) {
 			return;
