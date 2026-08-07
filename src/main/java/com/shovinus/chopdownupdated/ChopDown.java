@@ -1,6 +1,7 @@
 package com.shovinus.chopdownupdated;
 
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.text.TextComponentString;
 import net.minecraft.world.World;
@@ -14,6 +15,7 @@ import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLServerStartingEvent;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
+import net.minecraftforge.fml.common.registry.EntityRegistry;
 
 import java.util.LinkedList;
 import java.util.Iterator;
@@ -24,6 +26,7 @@ import org.apache.commons.lang3.ArrayUtils;
 import com.shovinus.chopdownupdated.command.CDUCommand;
 import com.shovinus.chopdownupdated.config.Config;
 import com.shovinus.chopdownupdated.config.TreeConfiguration;
+import com.shovinus.chopdownupdated.tree.TargetedFallingBlock;
 import com.shovinus.chopdownupdated.tree.Tree;
 
 @Mod(
@@ -55,6 +58,18 @@ public class ChopDown {
 
 	public void preinit(FMLPreInitializationEvent event) {
 		Config.load(event);
+		// Falling block entity for the visible trunk fall animation. updateFrequency
+		// 2 = position packet every other tick, smooth enough for the short fall.
+		EntityRegistry.registerModEntity(new ResourceLocation(MODID, "targeted_falling_block"),
+				TargetedFallingBlock.class, "targeted_falling_block", 0, this, 64, 2, true);
+		// Keep FML spawning enabled. TargetedFallingBlock implements
+		// IEntityAdditionalSpawnData so the client receives the block state and the
+		// exact planned target position rather than guessing a vanilla landing spot.
+		if (event.getSide().isClient()) {
+			// Separate class so the client render classes are never loaded on a
+			// dedicated server
+			ClientRenderRegistration.register();
+		}
 	}
 
 	@EventHandler

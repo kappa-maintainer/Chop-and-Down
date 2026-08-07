@@ -231,6 +231,39 @@ test {
     }
 }
 
+/*
+ * Offline geometry tests for the rigid trunk shape model
+ * (com.shovinus.chopdownupdated.tree.shape).
+ *
+ * Deliberately its own source set with a plain main() runner instead of the
+ * standard 'test' source set:
+ *
+ *   - it needs no JUnit dependency, which is gated behind enable_junit_testing
+ *   - it must NOT be attached to check/build, so a normal build never compiles,
+ *     resolves or runs it
+ *   - the shape package never touches BlockPos or World, so these tests run
+ *     without a Minecraft environment
+ *
+ * Run explicitly:  ./gradlew shapeTest
+ */
+sourceSets {
+    shapeTest {
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+
+tasks.register('shapeTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs the offline rigid trunk shape tests. Not part of build or check.'
+    dependsOn tasks.named('shapeTestClasses')
+    classpath = sourceSets.shapeTest.runtimeClasspath
+    mainClass = 'com.shovinus.chopdownupdated.tree.shape.ShapeTests'
+    javaLauncher.set(javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(25)
+    })
+}
+
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }

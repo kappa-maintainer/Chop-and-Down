@@ -1,31 +1,31 @@
 package com.shovinus.chopdownupdated.tree;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.PriorityQueue;
+import java.util.TreeMap;
 
 import javax.annotation.Nullable;
 
 import com.shovinus.chopdownupdated.config.TreeConfiguration;
 import com.shovinus.chopdownupdated.config.Config;
 import com.shovinus.chopdownupdated.config.PersonalConfig;
+import com.shovinus.chopdownupdated.tree.shape.ShapePos;
+import com.shovinus.chopdownupdated.tree.shape.TrunkPlanner;
+import com.shovinus.chopdownupdated.tree.shape.TrunkShape;
+import com.shovinus.chopdownupdated.tree.shape.TrunkSolver;
 
 import net.minecraft.block.Block;
-import net.minecraft.block.BlockFalling;
-import net.minecraft.block.ITileEntityProvider;
 import net.minecraft.block.material.Material;
 import net.minecraft.block.properties.IProperty;
 import net.minecraft.block.state.IBlockState;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.MoverType;
 import net.minecraft.entity.item.EntityItem;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.init.Blocks;
 import net.minecraft.item.ItemStack;
-import net.minecraft.nbt.NBTBase;
-import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.tileentity.TileEntity;
-import net.minecraft.util.EnumFacing;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
@@ -49,7 +49,13 @@ public class Tree implements Runnable {
 	HashMap<BlockPos, Boolean> logCache = new HashMap<>();
 	HashMap<BlockPos, Boolean> leafCache = new HashMap<>();
 	HashMap<BlockPos, Boolean> trunkCache = new HashMap<>();
+	HashMap<BlockPos, Boolean> trunkBlockCache = new HashMap<>();
 	HashMap<BlockPos, Boolean> draggableCache = new HashMap<>();
+	HashMap<Long, Integer> supportHeightCache = new HashMap<>();
+	HashSet<BlockPos> movingTreeBlocks = new HashSet<>();
+	HashSet<BlockPos> trunkTargets = new HashSet<>();
+	/* Terrain cells a redwood sized trunk is allowed to bed into as it lands. */
+	HashSet<BlockPos> trunkEmbedded = new HashSet<>();
 
 	HashMap<BlockPos, TreeMovePair> fallingBlocks = new HashMap<>();
 
@@ -58,6 +64,11 @@ public class Tree implements Runnable {
 	int fallX = 1;
 	int fallZ = 0;
 	int fallOffset = 0;
+	double trunkPitch = 0;
+	boolean trunkAnimated = true;
+	int trunkMaxRelY = 0;
+	private int supportScanTop = 0;
+	private boolean trunkSourcesCleared = false;
 
 	EnumFallAxis axis = EnumFallAxis.X;
 
@@ -357,30 +368,94 @@ public class Tree implements Runnable {
 	 * Calculate where this block should end up in our fallen tree (pre log in leaf
 	 * fall)
 	 */
-	private BlockPos repositionBlock(BlockPos pos) {
+	/*
+	 * Canopy blocks retain the legacy spreading rule. Trunk logs are planned
+	 * separately as one rigid, rotated volume by planRigidTrunkTargets().
+	 */
+	private BlockPos repositionCanopyBlock(BlockPos pos) {
 		int y = pos.getY() - base.getY();
-
 		int x = pos.getX() - (base.getX() + fallOffset);
 		int z = pos.getZ() - (base.getZ() + fallOffset);
-
 		int changeX = fallZ * z;
 		int changeZ = fallX * x;
-
-		int normPosX = (y * fallX);
-		int normPosZ = (y * fallZ);
-
+		int normPosX = y * fallX;
+		int normPosZ = y * fallZ;
 		return pos.add(normPosX - (changeZ * fallX), -(changeX + changeZ), normPosZ - (changeX * fallZ));
 	}
 
 	/*
-	 * Gets the block that would end up in the position below this one
+	 * A log block that belongs to the trunk itself: inside the trunk radius around
+	 * the trunk centre and part of a vertical run of logs at least 4 blocks long.
+	 * Canopy branches (short vertical runs) are excluded and drop flat together
+	 * with the leaves.
 	 */
-	private TreeMovePair getLowerTargetBlock(BlockPos pos) {
-		BlockPos lower = pos.add(0, -1, 0);
-		if (fallingBlocks.containsKey(lower)) {
-			return fallingBlocks.get(lower);
+	boolean isTrunkBlock(BlockPos pos) {
+		return trunkBlockCache.computeIfAbsent(pos, this::calculateIsTrunkBlock);
+	}
+
+	private boolean calculateIsTrunkBlock(BlockPos pos) {
+		int dx = pos.getX() - treeCenter.getX();
+		int dz = pos.getZ() - treeCenter.getZ();
+		int r = config.Trunk_Radius();
+		// Chebyshev distance: the whole 2x2 cross section of a thick trunk must be
+		// inside the trunk radius, not just the two pillars aligned with the axes
+		if (!isLog(pos) || Math.max(Math.abs(dx), Math.abs(dz)) > r) {
+			return false;
 		}
-		return null;
+		int run = 1;
+		BlockPos p = pos.add(0, 1, 0);
+		while (isLog(p) && run < 64) {
+			run++;
+			p = p.add(0, 1, 0);
+		}
+		p = pos.add(0, -1, 0);
+		while (isLog(p) && run < 64) {
+			run++;
+			p = p.add(0, -1, 0);
+		}
+		return run >= 4;
+	}
+
+	/*
+	 * Terrain support at an absolute horizontal position. Only blocks included in
+	 * this tree's move plan are transparent to the scan. The retained chop layer
+	 * (stump), branches outside the plan, and nearby trees remain solid support.
+	 */
+	private int supportHeightAt(int x, int z) {
+		long key = ((long) x << 32) ^ (z & 0xffffffffL);
+		Integer cached = supportHeightCache.get(key);
+		if (cached != null) {
+			return cached;
+		}
+		BlockPos p = new BlockPos(x, supportScanTop > 0 ? supportScanTop
+				: Math.min(255, base.getY() + trunkMaxRelY + 1), z);
+		while (p.getY() > 0) {
+			IBlockState state = world.getBlockState(p);
+			// The chop layer and everything below it is the retained stump. Only
+			// actual planned sources above that layer are transparent to this scan.
+			boolean movingTreeBlock = p.getY() > base.getY() && movingTreeBlocks.contains(p);
+			// Wood floats. The topmost water block is a support surface, so a trunk or
+			// a canopy block comes to rest on the surface instead of sinking to the
+			// sea floor. Water is replaceable, so this has to be tested before the
+			// crushable rule below or the scan walks straight through it.
+			if (!movingTreeBlock && isWater(state)) {
+				supportHeightCache.put(key, p.getY());
+				return p.getY();
+			}
+			// A falling trunk crushes vegetation instead of resting on it: grass,
+			// flowers, snow layers and vines are never support. isPassable covers the
+			// plant materials, isReplaceable additionally covers deep snow layers.
+			boolean crushable = isLeaf(p) || Tree.isLeaves(p, world)
+					|| state.getBlock().isReplaceable(world, p);
+			if (!movingTreeBlock && !crushable && !state.getBlock().isAir(state, world, p)
+					&& !state.getBlock().isPassable(world, p)) {
+				supportHeightCache.put(key, p.getY());
+				return p.getY();
+			}
+			p = p.add(0, -1, 0);
+		}
+		supportHeightCache.put(key, 0);
+		return 0;
 	}
 
 	/*
@@ -440,6 +515,17 @@ public class Tree implements Runnable {
 	 * to determine if the block more likely belongs to this tree or another
 	 */
 	private void getRealisticTree() {
+		// TEMP DEBUG: what did the BFS actually include
+		TreeMap<Integer, Integer> layerLogCount = new TreeMap<>();
+		HashMap<String, Integer> estPillar = new HashMap<>();
+		for (java.util.Map.Entry<BlockPos, Integer> e : estimatedTree.entrySet()) {
+			BlockPos p = e.getKey();
+			if (isLog(p)) {
+				estPillar.merge(p.getX() + "," + p.getZ(), 1, Integer::sum);
+				layerLogCount.merge(p.getY(), 1, Integer::sum);
+			}
+		}
+		System.out.println("[ChopDown-DEBUG] est pillars=" + estPillar + " layers=" + layerLogCount);
 		estimatedTreeQueue = new LinkedList<BlockPos>(estimatedTree.keySet());
 		LinkedList<BlockPos> realisticTree = new LinkedList<BlockPos>();
 		while (!estimatedTreeQueue.isEmpty()) {
@@ -457,7 +543,7 @@ public class Tree implements Runnable {
 					break;
 				}
 			}
-			if (mine && base != from) {
+			if (mine && !base.equals(from)) {
 				if (isLog(from) && (from.getY() == base.getY() + 1 || from.getY() == base.getY() + 2)
 						&& ((fallZ != 0 && (isLog(from.add(1, 0, 0)) || isLog(from.add(-1, 0, 0))))
 								|| (fallX != 0 && (isLog(from.add(0, 0, 1)) || isLog(from.add(0, 0, -1)))))) {
@@ -470,15 +556,186 @@ public class Tree implements Runnable {
 				realisticTree.add(from);
 			}
 		}
+		// The shape wall rests on the stump, its height is the trunk cross section
+		// along the fall axis: find the minimum fall-axis offset of the trunk logs
+		// before computing any drop positions
+		int trunkCount = 0;
+		int maxRelY = 0;
+		for (BlockPos from : realisticTree) {
+			if (!isTrunkBlock(from)) {
+				continue;
+			}
+			trunkCount++;
+			int relY = from.getY() - base.getY();
+			if (relY > maxRelY) {
+				maxRelY = relY;
+			}
+		}
+		trunkMaxRelY = maxRelY;
+		trunkAnimated = trunkCount <= 100;
+		// The rigid planner computes the center-line pitch after it knows the actual
+		// trunk footprint. Keep this value neutral until then.
+		trunkPitch = 0.0;
+
+		LinkedList<BlockPos> trunkBlocks = new LinkedList<>();
+		LinkedList<BlockPos> canopyBlocks = new LinkedList<>();
 		while (!realisticTree.isEmpty()) {
 			BlockPos from = realisticTree.pollFirst();
-			BlockPos to = repositionBlock(from);
+			if (isTrunkBlock(from)) {
+				trunkBlocks.add(from);
+			} else {
+				canopyBlocks.add(from);
+			}
+		}
+		movingTreeBlocks.clear();
+		movingTreeBlocks.addAll(trunkBlocks);
+		movingTreeBlocks.addAll(canopyBlocks);
+		supportHeightCache.clear();
+		// Trunk coordinates are authoritative. Canopy may yield vertically if it
+		// happens to target the same cell, never the other way around.
+		planRigidTrunkTargets(trunkBlocks);
+		if (failedToBuild) {
+			return;
+		}
+		for (BlockPos from : canopyBlocks) {
+			BlockPos to = repositionCanopyBlock(from);
+			while (fallingBlocks.containsKey(to)) {
+				to = to.add(0, 1, 0);
+			}
 			TreeMovePair pair = new TreeMovePair(from, to, this);
 			fallingBlocks.put(pair.to, pair);
 		}
+		// Canopy logs still swap down through pending leaves so they do not land on
+		// top of them. Rigid trunk targets are never swapped.
 		pushLogsThroughPendingLeaves();
 		fallingBlocksList = new LinkedList<>(fallingBlocks.keySet());
 		fallingBlocksList.sort(new AxisComparer(DirectionSort.UP));
+		// TEMP DEBUG: shape statistics
+		int leafCount = 0, nonTrunkLogs = 0, trunkSample = 0, trunkTotal = 0;
+		HashMap<String, Integer> pillarCount = new HashMap<>();
+		HashMap<String, BlockPos> pillarFirstTo = new HashMap<>();
+		BlockPos firstTrunkTo = null, lastTrunkTo = null;
+		for (TreeMovePair pair : fallingBlocks.values()) {
+			if (pair.trunk) {
+				trunkTotal++;
+				String pillar = pair.from.getX() + "," + pair.from.getZ();
+				pillarCount.merge(pillar, 1, Integer::sum);
+				pillarFirstTo.putIfAbsent(pillar, pair.to);
+				if (firstTrunkTo == null) {
+					firstTrunkTo = pair.to;
+				}
+				lastTrunkTo = pair.to;
+				if (trunkSample < 10) {
+					System.out.println("[ChopDown-DEBUG] trunkBlock from=" + pair.from + " to=" + pair.to);
+					trunkSample++;
+				}
+			} else {
+				leafCount++;
+				if (!pair.leaves) {
+					nonTrunkLogs++;
+				}
+			}
+		}
+		System.out.println("[ChopDown-DEBUG] shape: base=" + base + " treeCenter=" + treeCenter + " fallX=" + fallX
+				+ " fallZ=" + fallZ + " trunk=" + trunkTotal + " leaf=" + leafCount + " nonTrunkLogs=" + nonTrunkLogs
+				+ " pitch=" + trunkPitch + " animated=" + trunkAnimated + " pillars=" + pillarCount + " pillarTos="
+				+ pillarFirstTo + " firstTo=" + firstTrunkTo + " lastTo=" + lastTrunkTo);
+	}
+
+	/*
+	 * Rotate the vertical trunk volume ninety degrees around the root axis.
+	 *
+	 * The geometry, the resting attitude and the per-log decisions all live in the
+	 * Minecraft free shape package so they can be exercised by the offline shape
+	 * tests. This method only translates between BlockPos and ShapePos and turns
+	 * the resulting decisions into move pairs.
+	 *
+	 * No individual trunk target is shifted to avoid another trunk target. A
+	 * collision means the plan is wrong and is reported rather than silently
+	 * tearing a bark ring apart.
+	 */
+	private void planRigidTrunkTargets(LinkedList<BlockPos> trunkBlocks) {
+		if (trunkBlocks.isEmpty()) {
+			return;
+		}
+		ArrayList<ShapePos> sources = new ArrayList<>(trunkBlocks.size());
+		for (BlockPos pos : trunkBlocks) {
+			sources.add(new ShapePos(pos.getX(), pos.getY(), pos.getZ()));
+		}
+		// The actual trunk profile: a trunk that is wide at the root and narrow
+		// further up keeps that real shape, holes stay holes and a missing layer
+		// stays visible as an empty section.
+		TrunkShape shape = TrunkShape.build(sources, fallX, fallZ, base.getY());
+		// A beam that pitches up ends well above the standing tree, so the terrain
+		// scan has to start above that or a tall wall would never be seen at all.
+		supportScanTop = Math.min(255, base.getY() + trunkMaxRelY + shape.footprintReach() + 2);
+		TrunkSolver.Solution solution = TrunkSolver.solve(shape, this::supportHeightAt,
+				this::canEmbedInto);
+		trunkPitch = solution.pitch();
+		trunkEmbedded.clear();
+		for (ShapePos cell : solution.embedded()) {
+			trunkEmbedded.add(toBlockPos(cell));
+		}
+		TrunkPlanner.Plan plan = TrunkPlanner.plan(solution,
+				target -> isTrunkTargetBlocked(toBlockPos(target)));
+		if (plan.hasDuplicateTarget()) {
+			System.out.println(
+					"[ChopDown-DEBUG] rigid trunk target collision at " + plan.duplicateTarget());
+			failedToBuild = true;
+			return;
+		}
+
+		HashMap<BlockPos, TreeMovePair> planned = new HashMap<>();
+		for (TrunkPlanner.Decision decision : plan.decisions()) {
+			BlockPos from = toBlockPos(decision.source());
+			BlockPos target = toBlockPos(decision.target());
+			if (fallingBlocks.containsKey(target)) {
+				System.out.println("[ChopDown-DEBUG] rigid trunk target collision from=" + from
+						+ " to=" + target);
+				failedToBuild = true;
+				return;
+			}
+			TreeMovePair pair = new TreeMovePair(from, target, this);
+			if (decision.placement() == TrunkPlanner.Placement.DROP_AS_ITEM) {
+				// Never got past an obstacle: it comes down at the point the trunk
+				// actually leans against, not on the far side of it.
+				pair.dropAsItem = true;
+				pair.dropAt = toBlockPos(decision.dropAt());
+			} else if (decision.placement() == TrunkPlanner.Placement.SEVERED) {
+				// Past the break this section is no longer part of the rigid beam.
+				pair.severed = true;
+			}
+			planned.put(target, pair);
+		}
+
+		fallingBlocks.putAll(planned);
+		// Only cells the surviving rigid beam actually occupies are reserved against
+		// canopy or severed logs sinking into them.
+		for (TreeMovePair pair : planned.values()) {
+			if (!pair.dropAsItem && !pair.severed) {
+				trunkTargets.add(pair.to);
+			}
+		}
+		System.out.println("[ChopDown-DEBUG] rigidTrunk rootSupport=" + solution.rootSupport()
+				+ " advance=" + shape.rootAdvance() + " minHeight=" + shape.minHeight()
+				+ " vMin=" + shape.verticalMin() + " thick=" + shape.thickness()
+				+ " sections=" + shape.sectionCount() + " emptySections=" + shape.emptySteps()
+				+ " pitch=" + solution.pitch() + " datum=" + solution.datum()
+				+ " rootLift=" + solution.rootLift() + " com=" + solution.centreOfMass()
+				+ " outerContact=" + solution.outermostContact()
+				+ " tipRounds=" + solution.tipRounds()
+				+ " momentSnap=" + solution.snapAtStep()
+				+ " overhangSnap=" + solution.overhangSnap()
+				+ " blockedSnap=" + plan.blockedSnap() + " snapStep=" + plan.snapStep()
+				+ " clamped=" + solution.clampedColumns() + " contact=" + solution.contact()
+				+ " embedded=" + solution.embedded().size()
+				+ " fibres=" + plan.fibres() + " occluded=" + plan.items()
+				+ " severed=" + plan.severed() + " segPitch=" + plan.severedPitch()
+				+ " segDatum=" + plan.severedDatum() + " targets=" + plan.decisions().size());
+	}
+
+	private static BlockPos toBlockPos(ShapePos pos) {
+		return new BlockPos(pos.x(), pos.y(), pos.z());
 	}
 
 	@Override
@@ -498,11 +755,13 @@ public class Tree implements Runnable {
 		startedDropping = true;
 		// breakStackedPendingLeaves touches the world (dropDrops spawns items,
 		// setBlockState writes blocks), so it must run on the server thread, not on
-		// the calculation thread that builds the tree
+		// the calculation thread that builds the tree. It runs before any source is
+		// cleared so the leaves it removes still drop their items.
 		if (!pendingLeavesBroken) {
 			pendingLeavesBroken = true;
 			breakStackedPendingLeaves();
 		}
+		clearTrunkSources();
 		int blocksRemaining = Config.maxDropsPerTickPerTree;
 		BlockPos pos;
 		int size = fallingBlocksList.size();
@@ -522,6 +781,8 @@ public class Tree implements Runnable {
 		if (!fallingBlocksList.isEmpty()) {
 			return false;
 		}
+		System.out.println("[ChopDown-DEBUG] dropDone trunkPlaced=" + trunkPlaced + " trunkDirect=" + trunkDirect
+				+ " trunkSevered=" + trunkSevered + " listEmpty=" + fallingBlocksList.isEmpty());
 		return true;
 	}
 
@@ -621,46 +882,277 @@ public class Tree implements Runnable {
 	 * it can't, handles falling entity and calculated drop) Also handles debug
 	 * configs.
 	 */
-	private boolean drop(TreeMovePair pair, Boolean UseSolid) {
-		if (!(isLog(pair.from) || isLeaf(pair.from))) {
+	private int nonTrunkLogged = 0;
+	private int dropToItemLogged = 0;
+	private int manualClearLogged = 0;
+	private int vanishedLogged = 0;
+	private int trunkPlaced = 0;
+	private int trunkDirect = 0;
+	private int directPlaceLogged = 0;
+	private int severedLogged = 0;
+	private int trunkSevered = 0;
+	public static int moveReplaceLogged = 0;
+
+	/*
+	 * A rigid trunk is written back as one body, so every trunk source must be air
+	 * before the first trunk target is placed. Canopy sources that a trunk target
+	 * overlaps are cleared too: those pairs keep their captured state, so they
+	 * still move their own block instead of picking up a freshly placed trunk log.
+	 */
+	private void clearTrunkSources() {
+		if (trunkSourcesCleared) {
+			return;
+		}
+		trunkSourcesCleared = true;
+		// Bed the trunk in first: the cells it settles into have to be gone before
+		// any trunk log is written, or the log would land on the soil it displaces.
+		// The plan was built earlier, so every cell is re-checked against the world
+		// as it is now; anything that changed is left alone and the log above it
+		// falls back to the runtime canTrunkOccupy check in drop().
+		int carved = 0;
+		int refused = 0;
+		for (BlockPos pos : trunkEmbedded) {
+			if (!canEmbedInto(pos.getX(), pos.getY(), pos.getZ())) {
+				refused++;
+				continue;
+			}
+			// Displaced terrain is dropped rather than deleted: plain stone and soil
+			// may well have been placed by the player.
+			dropDrops(pos, pos, world.getBlockState(pos), world);
+			world.setBlockState(pos, Blocks.AIR.getDefaultState());
+			carved++;
+		}
+		if (carved > 0 || refused > 0) {
+			System.out.println("[ChopDown-DEBUG] trunkEmbed carved=" + carved + " refused="
+					+ refused + " planned=" + trunkEmbedded.size());
+		}
+		LinkedList<TreeMovePair> trunkPairs = new LinkedList<>();
+		HashMap<BlockPos, TreeMovePair> canopyBySource = new HashMap<>();
+		for (TreeMovePair pair : fallingBlocks.values()) {
+			if (pair.trunk) {
+				trunkPairs.add(pair);
+			} else {
+				canopyBySource.put(pair.from, pair);
+			}
+		}
+		for (TreeMovePair pair : trunkPairs) {
+			// Tile entities are rare on logs, but resolve them before clearing the
+			// source so a rigid bulk move cannot lose their data.
+			pair.getTile();
+			world.setBlockState(pair.from, Blocks.AIR.getDefaultState());
+			pair.sourceCleared = true;
+		}
+		for (TreeMovePair pair : trunkPairs) {
+			TreeMovePair blocked = canopyBySource.get(pair.to);
+			if (blocked == null || blocked.sourceCleared) {
+				continue;
+			}
+			blocked.getTile();
+			world.setBlockState(blocked.from, Blocks.AIR.getDefaultState());
+			blocked.sourceCleared = true;
+		}
+	}
+
+	/*
+	 * A falling trunk crushes air, passable blocks (grass, flowers, snow layers)
+	 * and leaves. Anything else stops it, and that log drops as an item instead of
+	 * being placed.
+	 *
+	 * Deliberately NOT keyed on Config.logs: that list is the union of every tree
+	 * configuration of every mod, so a player built wall made of redwood planks or
+	 * logs would be treated as crushable and get eaten by the falling trunk.
+	 */
+	public static boolean canTrunkOccupy(BlockPos pos, World world) {
+		if (pos.getY() <= 0) {
+			return false;
+		}
+		IBlockState state = world.getBlockState(pos);
+		Block block = state.getBlock();
+		return block.isAir(state, world, pos) || block.isPassable(world, pos)
+				|| block.isReplaceable(world, pos) || isLeaves(pos, world);
+	}
+
+	/*
+	 * Blocked for the purpose of trunk planning. This tree's own blocks are still
+	 * standing while the plan is built and will move away, so they never block it.
+	 */
+	private boolean isTrunkTargetBlocked(BlockPos target) {
+		if (target.getY() <= 0 || target.getY() > 255) {
 			return true;
+		}
+		if (movingTreeBlocks.contains(target)) {
+			return false;
+		}
+		// Cells the trunk beds into are displaced before it is placed, so they do not
+		// stop it either.
+		if (trunkEmbedded.contains(target)) {
+			return false;
+		}
+		return !canTrunkOccupy(target, world);
+	}
+
+	/*
+	 * Terrain a redwood sized trunk is allowed to displace so it beds into the
+	 * ground instead of lying on top of it.
+	 *
+	 * A strict whitelist, deliberately not a hardness or isReplaceable test: those
+	 * would let a falling trunk eat ore, a player built wall, a chest or a machine.
+	 * Only plain soil and plain stone give way, and only as deep and as much as
+	 * TrunkSolver.EMBED_DEPTH_MAX and EMBED_BUDGET allow.
+	 */
+	private boolean canEmbedInto(int x, int y, int z) {
+		if (y <= 0) {
+			return false;
+		}
+		BlockPos pos = new BlockPos(x, y, z);
+		IBlockState state = world.getBlockState(pos);
+		Block block = state.getBlock();
+		boolean soil = block == Blocks.DIRT || block == Blocks.GRASS;
+		// Plain stone only. The granite, diorite and andesite variants share this
+		// block but read as decoration, and every other rock is off the list.
+		boolean plainStone = block == Blocks.STONE && block.getMetaFromState(state) == 0;
+		if (!soil && !plainStone) {
+			return false;
+		}
+		// Nothing on the list carries a tile entity, so if one is here the block is
+		// not what it claims to be.
+		return world.getTileEntity(pos) == null;
+	}
+
+	private boolean drop(TreeMovePair pair, Boolean UseSolid) {
+		if (!pair.sourceCleared && !(isLog(pair.from) || isLeaf(pair.from))) {
+			if (vanishedLogged < 20) {
+				System.out.println("[ChopDown-DEBUG] vanished from=" + pair.from + " to=" + pair.to + " leaves="
+						+ pair.leaves + " trunk=" + pair.trunk + " block="
+						+ world.getBlockState(pair.from).getBlock());
+				vanishedLogged++;
+			}
+			return true;
+		}
+		if (!pair.leaves && !pair.trunk && nonTrunkLogged < 8) {
+			System.out.println("[ChopDown-DEBUG] branchLog from=" + pair.from + " to=" + pair.to + " useSolid="
+					+ UseSolid);
+			nonTrunkLogged++;
 		}
 		PersonalConfig playerConfig = Config.getPlayerConfig(player.getUniqueID());
 		// Turn the tree in to glass if set as don't drop;
 		if (playerConfig.makeGlass && playerConfig.dontFell) {
-			if (isLog(pair.from)) {
+			if (pair.trunk || isLog(pair.from)) {
 				world.setBlockState(pair.from, Blocks.STAINED_GLASS.getStateFromMeta(1));
 			} else {
 				world.setBlockState(pair.from, Blocks.STAINED_GLASS.getStateFromMeta(2));
 			}
 			return true;
 		}
-		// Get the state of the tree block (rotate the log if first time moving)
-		IBlockState state = world.getBlockState(pair.from);
-		IBlockState originalState = state;
-		if (!pair.moved && isLog(pair.from)) {
-			state = rotateLog(world, state);
+		// Pair state is captured during planning, before a rigid trunk is bulk-cleared.
+		// It already includes the 90-degree log-axis rotation for logs.
+		IBlockState state = pair.state;
+		// Trunk logs keep the tree shape: they either fall from the original height
+		// of the log down onto the computed spot (small trees, visible animation) or
+		// are placed directly (large trees, animating hundreds of blocks would look
+		// like a lag spike)
+		if (pair.trunk) {
+			// Planned occlusion: this section is behind a wall or inside a cliff, so it
+			// drops as an item. The runtime check is a safety net for a world that
+			// changed after the plan was built.
+			if (pair.dropAsItem || !canTrunkOccupy(pair.to, world)) {
+				// Planned occlusion drops at the contact point the fibre stopped on.
+				BlockPos dropAt = pair.dropAt != null ? pair.dropAt : pair.to;
+				if (dropToItemLogged < 20) {
+					System.out.println("[ChopDown-DEBUG] trunkBlocked from=" + pair.from + " to=" + pair.to
+							+ " dropAt=" + dropAt + " planned=" + pair.dropAsItem + " at="
+							+ world.getBlockState(pair.to).getBlock());
+					dropToItemLogged++;
+				}
+				dropDrops(pair.from, dropAt, state, world);
+				if (!pair.sourceCleared) {
+					world.setBlockState(pair.from, Blocks.AIR.getDefaultState());
+				}
+				return true;
+			}
+			if (pair.severed) {
+				// The severed segment was re-attituded to its own resting position by
+				// the planner, so it is placed directly as part of the rigid body
+				// instead of falling loose and scattering. The runtime occupancy
+				// check above is the safety net: if the world changed and the target
+				// is no longer free, that log drops as an item.
+				if (severedLogged < 20) {
+					System.out.println("[ChopDown-DEBUG] severedPlace from=" + pair.from + " to=" + pair.to);
+					severedLogged++;
+				}
+				trunkSevered++;
+				// Fall through to the normal direct-place / animate path below.
+			}
+			if (!trunkAnimated || pair.from.getY() - base.getY() > 10) {
+				// Large trees and the canopy sections of the trunk are placed directly:
+				// animating them would leave falling blocks in the path of the canopy
+				if (directPlaceLogged < 20) {
+					System.out.println("[ChopDown-DEBUG] directPlace from=" + pair.from + " to=" + pair.to
+							+ " below=" + world.getBlockState(pair.to.down()).getBlock() + " at="
+							+ world.getBlockState(pair.to));
+					directPlaceLogged++;
+				}
+				if (!pair.sourceCleared) {
+					world.setBlockState(pair.from, Blocks.AIR.getDefaultState());
+				}
+				pair.from = pair.to;
+				pair.moved = true;
+				pair.move();
+				trunkDirect++;
+				trunkPlaced++;
+				return true;
+			}
+			// Animated trunk section: spawn a visible falling entity from the original
+			// height of the log. The entity falls with vanilla gravity but is placed
+			// EXACTLY at the computed landing spot when its y reaches the target,
+			// so the trunk keeps its straight line even across a chasm.
+			if (!pair.sourceCleared) {
+				world.setBlockState(pair.from, Blocks.AIR.getDefaultState());
+			}
+			// Always start above the planned landing height, even when the target ends
+			// up higher than the source (uphill support line or a lifted beam).
+			double spawnY = Math.max(pair.from.getY(), pair.to.getY() + 1) + 0.5;
+			TargetedFallingBlock fallingBlock = new TargetedFallingBlock(world, pair.to.getX() + 0.5,
+					spawnY, pair.to.getZ() + 0.5, state, pair.getTile(), true, pair.to);
+			fallingBlock.fallTime = 1;
+			world.spawnEntity(fallingBlock);
+			trunkPlaced++;
+			return true;
 		}
 		// If the target block is not passable or the source block is leaves and the
 		// config is set to break leaves then do drops and state finished
 		if ((!CanMoveTo(pair.to,!pair.leaves) && !pair.moved) || (isLeaf(pair.from) && Config.breakLeaves)) {
+			if (dropToItemLogged < 20) {
+				System.out.println("[ChopDown-DEBUG] dropToItem from=" + pair.from + " to=" + pair.to + " leaves="
+						+ pair.leaves + " trunk=" + pair.trunk + " canMove=" + CanMoveTo(pair.to, !pair.leaves));
+				dropToItemLogged++;
+			}
 			// Do drops at location
 			dropDrops(pair.from, pair.to, state, world);
-			world.setBlockState(pair.from, Blocks.AIR.getDefaultState());
+			if (!pair.sourceCleared) {
+				world.setBlockState(pair.from, Blocks.AIR.getDefaultState());
+			}
 			return true;
 		} else if (!CanMoveTo(pair.to,!pair.leaves)) {
 			return true;
 		}
 		// Can move to this block, set the source block to air, set the from block as to
 		// and state that we moved
-		world.setBlockState(pair.from, Blocks.AIR.getDefaultState());
+		if (!pair.sourceCleared) {
+			world.setBlockState(pair.from, Blocks.AIR.getDefaultState());
+		}
 		pair.from = pair.to;
 		pair.moved = true;
 
 		if (playerConfig.dontFell) {
 			pair.move();
+		} else if (!pair.leaves && !pair.trunk) {
+			// Non-trunk logs (canopy branches) drop straight down through leaves to
+			// the ground: falling entities would land on the still standing canopy
+			// and be left floating in the air when the canopy falls away
+			ManuallyDrop(pair, state);
 		} else {
-			if (!UseSolid) {
+			if (!UseSolid && !restsOnWater(pair.to)) {
 				// Use falling entities
 				clearLeafLandingPath(pair);
 				EntityFallingBlock fallingBlock = new EntityFallingBlock(world, pair.to.getX() + 0.5,
@@ -681,6 +1173,12 @@ public class Tree implements Runnable {
 			pair.to = pair.to.add(0, -1, 0);
 			breakLeafAt(pair.to);
 			if(!isAir(pair.to)) {
+				if (manualClearLogged < 20) {
+					System.out.println("[ChopDown-DEBUG] manualClear from=" + pair.from + " cleared=" + pair.to
+							+ " block=" + world.getBlockState(pair.to).getBlock() + " leaves=" + pair.leaves
+							+ " trunk=" + pair.trunk);
+					manualClearLogged++;
+				}
 				IBlockState state2 = world.getBlockState(pair.to);
 				Tree.dropDrops(pair.from, pair.to, world.getBlockState(pair.to),world);
 				world.setBlockState(pair.to,Blocks.AIR.getDefaultState() );
@@ -699,14 +1197,14 @@ public class Tree implements Runnable {
 			moved = false;
 			LinkedList<BlockPos> logPositions = new LinkedList<BlockPos>();
 			for (TreeMovePair pair : fallingBlocks.values()) {
-				if (!pair.leaves) {
+				if (!pair.leaves && !pair.trunk) {
 					logPositions.add(pair.to);
 				}
 			}
 			logPositions.sort(new AxisComparer(DirectionSort.DOWN));
 			for (BlockPos pos : logPositions) {
 				TreeMovePair pair = fallingBlocks.get(pos);
-				if (pair == null || pair.leaves) {
+				if (pair == null || pair.leaves || pair.trunk) {
 					continue;
 				}
 				moved = pushLogThroughPendingLeaves(pair) || moved;
@@ -790,7 +1288,11 @@ public class Tree implements Runnable {
 			return false;
 		}
 		fallingBlocks.remove(pos);
-		if (Tree.isLeaves(pair.from, world)) {
+		if (pair.sourceCleared) {
+			// The source was already emptied for a rigid trunk target, drop the
+			// captured state instead of reading air back out of the world
+			Tree.dropDrops(pair.from, pair.to, pair.state, world);
+		} else if (Tree.isLeaves(pair.from, world)) {
 			Tree.dropDrops(pair.from, pair.to, world.getBlockState(pair.from), world);
 			world.setBlockState(pair.from, Blocks.AIR.getDefaultState());
 		}
@@ -815,8 +1317,46 @@ public class Tree implements Runnable {
 		return pair != null && pair.leaves && fallingBlocksList.contains(pos);
 	}
 
+	/*
+	 * Water is a support surface because wood floats. Lava deliberately is not: a
+	 * tree felled into lava still burns up instead of resting on it.
+	 */
+	private static boolean isWater(IBlockState state) {
+		return state.getMaterial() == Material.WATER;
+	}
+
+	/*
+	 * Whether a block released at pos would come to rest on water. A vanilla
+	 * falling block entity ignores water entirely and sinks to the sea floor, so
+	 * those are routed through ManuallyDrop instead, which stops at the surface.
+	 */
+	private boolean restsOnWater(BlockPos pos) {
+		BlockPos p = pos;
+		while (p.getY() > 0) {
+			BlockPos below = p.add(0, -1, 0);
+			if (isWater(world.getBlockState(below))) {
+				return true;
+			}
+			if (!CanMoveTo(below, true) && !Tree.isLeaves(below, world) && !isPendingLeaf(below)) {
+				return false;
+			}
+			p = below;
+		}
+		return false;
+	}
+
 	private boolean CanMoveThroughBelow(TreeMovePair pair) {
 		BlockPos below = pair.to.add(0, -1, 0);
+		// A cell reserved for the rigid trunk is never entered by a canopy block:
+		// the trunk is planned first and its continuity must not be broken by a
+		// branch log that happens to sink into it first.
+		if (trunkTargets.contains(below)) {
+			return false;
+		}
+		// Wood floats: a block walking down comes to rest on the water surface.
+		if (isWater(world.getBlockState(below))) {
+			return false;
+		}
 		return CanMoveTo(below, !pair.leaves) || Tree.isLeaves(below, world) || isPendingLeaf(below);
 	}
 
@@ -1018,178 +1558,11 @@ public class Tree implements Runnable {
 	/*
 	 * Class to house the falling logs and leaves
 	 */
-	public static class EntityFallingBlock extends net.minecraft.entity.item.EntityFallingBlock {
+	public static class EntityFallingBlock extends TargetedFallingBlock {
 
 		EntityFallingBlock(World worldIn, double x, double y, double z, IBlockState fallingBlockState, TileEntity tile,
 				Boolean isLog) {
-			super(worldIn, x, y, z, fallingBlockState);
-			this.isLog = isLog;
-			setHurtEntities(true);
-			if (tile != null) {
-				tileEntityData = tile.writeToNBT(new NBTTagCompound());
-			}
-
-		}
-
-		private boolean isLog = true;
-
-		/**
-		 * Called to update the entity's position/logic.
-		 */
-		@Nullable
-		@Override
-		public void onUpdate() {
-			Block block = this.getBlock().getBlock();
-
-			if (this.getBlock().getMaterial() == Material.AIR) {
-				this.setDead();
-			} else {
-				this.prevPosX = this.posX;
-				this.prevPosY = this.posY;
-				this.prevPosZ = this.posZ;
-
-				if (this.fallTime++ == 0) {
-					BlockPos blockpos = new BlockPos(this);
-
-					if (this.world.getBlockState(blockpos).getBlock() == block) {
-						this.world.setBlockToAir(blockpos);
-					} else if (!this.world.isRemote) {
-						this.setDead();
-						return;
-					}
-				}
-
-				if (!this.hasNoGravity()) {
-					this.motionY -= 0.03999999910593033D;
-				}
-				if (isLog) {
-					// Break leaves in the way of the falling log: check every block on the
-					// actual movement path (cheap replacement for the old 100 block scan,
-					// prevents the log from landing on top of another tree's leaves)
-					BlockPos currentPos = new BlockPos(this);
-					BlockPos targetPos = new BlockPos(this.posX, this.posY + this.motionY, this.posZ);
-					for (int y = currentPos.getY(); y >= targetPos.getY(); y--) {
-						if (y <= 0) {
-							break;
-						}
-						BlockPos leafPos = new BlockPos(currentPos.getX(), y, currentPos.getZ());
-						if (Tree.isLeaves(leafPos, world)) {
-							Tree.dropDrops(leafPos, leafPos, world.getBlockState(leafPos), world);
-							world.setBlockState(leafPos, Blocks.AIR.getDefaultState());
-						}
-					}
-				}
-				this.move(MoverType.SELF, this.motionX, this.motionY, this.motionZ);
-				this.motionX *= 0.9800000190734863D;
-				this.motionY *= 0.9800000190734863D;
-				this.motionZ *= 0.9800000190734863D;
-
-				if (!this.world.isRemote) {
-					BlockPos blockpos1 = new BlockPos(this);
-
-					if (this.onGround) {
-						IBlockState iblockstate = this.world.getBlockState(blockpos1);
-						BlockPos targetBlock = new BlockPos(this.posX, this.posY - 0.009999999776482582D, this.posZ);
-						if ((BlockFalling.canFallThrough(this.world.getBlockState(targetBlock))
-								&& Tree.blockName(targetBlock.add(0, -1, 0), this.world).matches("fence"))) {
-							this.onGround = false;
-							return;
-						}
-						if (!isLog && Tree.isLeaves(targetBlock, world)) {
-							Tree.dropDrops(targetBlock, targetBlock, world.getBlockState(targetBlock), world);
-							world.setBlockState(targetBlock, Blocks.AIR.getDefaultState());
-							this.onGround = false;
-							return;
-
-						}
-						this.motionX *= 0.699999988079071D;
-						this.motionZ *= 0.699999988079071D;
-						this.motionY *= -0.5D;
-
-						if (iblockstate.getBlock() != Blocks.PISTON_EXTENSION) {
-							this.setDead();
-
-                            if (this.world.mayPlace(block, blockpos1, true, EnumFacing.UP, (Entity) null)
-                                && !BlockFalling.canFallThrough(this.world.getBlockState(blockpos1.down()))
-                                && this.world.setBlockState(blockpos1, this.getBlock(), 3)) {
-                                if (block instanceof BlockFalling) {
-                                    ((BlockFalling) block).onEndFalling(this.world, blockpos1, null, null);
-                                }
-
-                                if (this.tileEntityData != null && block instanceof ITileEntityProvider) {
-                                    TileEntity tileentity = this.world.getTileEntity(blockpos1);
-
-                                    if (tileentity != null) {
-                                        NBTTagCompound nbttagcompound = tileentity.writeToNBT(new NBTTagCompound());
-
-                                        for (String s : this.tileEntityData.getKeySet()) {
-                                            NBTBase nbtbase = this.tileEntityData.getTag(s);
-
-                                            if (!"x".equals(s) && !"y".equals(s) && !"z".equals(s)) {
-                                                nbttagcompound.setTag(s, nbtbase.copy());
-                                            }
-                                        }
-
-                                        tileentity.readFromNBT(nbttagcompound);
-                                        tileentity.markDirty();
-                                    }
-                                }
-                            } else if (this.shouldDropItem
-                                && this.world.getGameRules().getBoolean("doEntityDrops")) {
-                                this.entityDropItem(new ItemStack(block, 1, block.damageDropped(this.getBlock())),
-                                    0.0F);
-                            }
-                        }
-					} else if (this.fallTime > 100 && (blockpos1.getY() < 1 || blockpos1.getY() > 256) || this.fallTime > 600) {
-						if (this.shouldDropItem && this.world.getGameRules().getBoolean("doEntityDrops")) {
-							this.entityDropItem(new ItemStack(block, 1, block.damageDropped(this.getBlock())), 0.0F);
-						}
-
-						this.setDead();
-					}
-				}
-			}
-		}
-
-		@Nullable
-		@Override
-		public EntityItem entityDropItem(ItemStack stack, float offsetY) {
-
-			IBlockState state = getBlock();
-			Block block = this.getBlock().getBlock();
-			BlockPos pos = new BlockPos(this);
-			IBlockState toState = world.getBlockState(pos);
-
-			boolean isPassable = toState.getBlock().isPassable(world, pos);
-			while (!isPassable && pos.getY() < 256) {
-				pos = pos.add(0, 1, 0);
-				toState = world.getBlockState(pos);
-				isPassable = toState.getBlock().isPassable(world, pos);
-			}
-			if (pos.getY() > 255) {
-				return null;
-			}
-			Tree.dropDrops(pos, pos, toState, world);
-			world.setBlockState(pos, state);
-			if (this.tileEntityData != null && block instanceof ITileEntityProvider) {
-				TileEntity tileentity = this.world.getTileEntity(pos);
-
-				if (tileentity != null) {
-					NBTTagCompound nbttagcompound = tileentity.writeToNBT(new NBTTagCompound());
-
-					for (String s : this.tileEntityData.getKeySet()) {
-						NBTBase nbtbase = this.tileEntityData.getTag(s);
-
-						if (!"x".equals(s) && !"y".equals(s) && !"z".equals(s)) {
-							nbttagcompound.setTag(s, nbtbase.copy());
-						}
-					}
-
-					tileentity.readFromNBT(nbttagcompound);
-					tileentity.markDirty();
-				}
-			}
-			return null;
+			super(worldIn, x, y, z, fallingBlockState, tile, isLog, null);
 		}
 	}
 
