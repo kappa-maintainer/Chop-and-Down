@@ -34,3 +34,6 @@ gradle-app.setting
 run
 out
 *.ini
+
+/.pi*
+/*.zip

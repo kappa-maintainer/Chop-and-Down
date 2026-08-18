@@ -1,6 +1,7 @@
 package com.shovinus.chopdownupdated.tree.shape;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -976,6 +977,117 @@ public final class ShapeTests {
 		eqi(descendTo(ocean, 65, 80, 0), 64, "loose block over land rests on the ground");
 	}
 
+	private static void testCanopySettle() {
+		group("canopy collapses onto trunk stations");
+		TrunkPlanner.BlockedProbe unblocked = t -> false;
+		TrunkSolver.SupportProbe flat63 = (x, z) -> 63;
+
+		// Fall along x (fallAxisIsX=true). Trunk stations at x=10,11,12.
+		List<Integer> stations = List.of(10, 11, 12);
+
+		// Three leaves at perpendicular z=0, rotated fall-axis x=10,11,12.
+		// They snap to three different stations, each a 1-leaf column.
+		List<ShapePos> src = List.of(
+				new ShapePos(0, 10, 0),
+				new ShapePos(0, 11, 0),
+				new ShapePos(0, 12, 0));
+		List<ShapePos> rot = List.of(
+				new ShapePos(10, 70, 0),
+				new ShapePos(11, 70, 0),
+				new ShapePos(12, 70, 0));
+		List<CanopySettler.Decision> sep = CanopySettler.settle(src, rot, true, stations, flat63, unblocked);
+		Map<String, TreeSet<Integer>> sepCols = new TreeMap<>();
+		for (CanopySettler.Decision d : sep) {
+			sepCols.computeIfAbsent(d.target().x() + "," + d.target().z(), k -> new TreeSet<>())
+					.add(d.target().y());
+		}
+		eqi(sepCols.size(), 3, "three leaves at three stations = three columns");
+		for (var e : sepCols.values()) {
+			eqi(e.first(), 64, "each leaf rests on terrain+1");
+		}
+
+		// Two leaves at same perpendicular z=0, rotated fall-axis x=10 and x=10.
+		// Both snap to station x=10 (nearest). They stack vertically: 64, 65.
+		List<ShapePos> pileSrc = List.of(new ShapePos(0, 10, 0), new ShapePos(0, 11, 0));
+		List<ShapePos> pileRot = List.of(new ShapePos(10, 70, 0), new ShapePos(10, 71, 0));
+		List<Integer> oneStation = List.of(10);
+		List<CanopySettler.Decision> pile = CanopySettler.settle(pileSrc, pileRot, true, oneStation, flat63, unblocked);
+		TreeSet<Integer> pileYs = new TreeSet<>();
+		for (CanopySettler.Decision d : pile) {
+			pileYs.add(d.target().y());
+		}
+		eqi(pileYs.size(), 2, "two leaves stack at one station");
+		eqi(pileYs.first(), 64, "bottom leaf on terrain+1");
+		eqi(pileYs.last(), 65, "second leaf stacks above");
+
+		// The canopy rests on the fallen trunk, not terrain under it: support 68
+		// means leaves stack from 69.
+		TrunkSolver.SupportProbe trunkTop = (x, z) -> 68;
+		List<CanopySettler.Decision> onTrunk = CanopySettler.settle(pileSrc, pileRot, true, oneStation, trunkTop, unblocked);
+		TreeSet<Integer> onTrunkYs = new TreeSet<>();
+		for (CanopySettler.Decision d : onTrunk) {
+			onTrunkYs.add(d.target().y());
+		}
+		eqi(onTrunkYs.first(), 69, "canopy bottom rests on trunk top");
+		eqi(onTrunkYs.last(), 70, "second leaf stacks above");
+
+		// Different perpendicular axes are independent columns.
+		List<ShapePos> twoPerpSrc = List.of(new ShapePos(0, 10, 0), new ShapePos(0, 10, 1));
+		List<ShapePos> twoPerpRot = List.of(new ShapePos(10, 70, 0), new ShapePos(10, 70, 1));
+		List<CanopySettler.Decision> twoPerp = CanopySettler.settle(twoPerpSrc, twoPerpRot, true, oneStation, flat63, unblocked);
+		Map<Integer, Integer> perpBottoms = new TreeMap<>();
+		for (CanopySettler.Decision d : twoPerp) {
+			perpBottoms.merge(d.target().z(), d.target().y(), Math::min);
+		}
+		eqi(perpBottoms.size(), 2, "two perpendicular axes = two columns");
+		eqi(perpBottoms.get(0), 64, "z=0 column at 64");
+		eqi(perpBottoms.get(1), 64, "z=1 column at 64");
+
+		// A settled cell that lands on a trunk cell is marked dropped.
+		TrunkPlanner.BlockedProbe blocked = t -> t.y() == 64;
+		List<CanopySettler.Decision> collide = CanopySettler.settle(pileSrc, pileRot, true, oneStation, flat63, blocked);
+		Map<Integer, Boolean> droppedByStack = new HashMap<>();
+		for (CanopySettler.Decision d : collide) {
+			droppedByStack.put(d.target().y(), d.dropped());
+		}
+		check(droppedByStack.get(64), "bottom leaf colliding with trunk is dropped");
+		check(!droppedByStack.get(65), "leaf above the collision is kept");
+
+		// A ball-shaped canopy collapses into a mound: the centre station (most
+		// leaves snap there) is tallest, edges are shortest.
+		List<ShapePos> sphereSrc = new ArrayList<>();
+		List<ShapePos> sphereRot = new ArrayList<>();
+		for (int dy = -4; dy <= 4; dy++) {
+			for (int dx = -4; dx <= 4; dx++) {
+				if (dx * dx + dy * dy > 16) {
+					continue;
+				}
+				sphereSrc.add(new ShapePos(dx, 10 + dy, 0));
+				sphereRot.add(new ShapePos(10 + dx, 70 + dy, 0));
+			}
+		}
+		List<Integer> sphereStations = new ArrayList<>();
+		for (int s = 6; s <= 14; s++) {
+			sphereStations.add(s);
+		}
+		List<CanopySettler.Decision> mound = CanopySettler.settle(sphereSrc, sphereRot, true, sphereStations, flat63, unblocked);
+		Map<Integer, Integer> stackHeights = new TreeMap<>();
+		for (CanopySettler.Decision d : mound) {
+			stackHeights.merge(d.target().x(), 1, Integer::sum);
+		}
+		int centreHeight = stackHeights.getOrDefault(10, 0);
+		int edgeHeight = stackHeights.getOrDefault(14, 0);
+		check(centreHeight > edgeHeight,
+				"sphere centre stacks taller than edge (" + centreHeight + " > " + edgeHeight + ")");
+		check(centreHeight > 1, "centre column has a real stack, not a single leaf");
+
+		// The water surface is a support face, so a canopy over water floats.
+		TrunkSolver.SupportProbe waterSurface = (x, z) -> 62;
+		List<CanopySettler.Decision> afloat = CanopySettler.settle(
+				List.of(new ShapePos(0, 10, 0)), List.of(new ShapePos(10, 70, 0)), true, oneStation, waterSurface, unblocked);
+		eqi(afloat.get(0).target().y(), 63, "canopy floats on the water surface");
+	}
+
 	/* The fallen trunk must keep its cross section, not be flattened into a slab. */
 	private static void testShapeIsKept() {
 		group("cross section is kept");
@@ -1012,6 +1124,7 @@ public final class ShapeTests {
 		testEmbedding();
 		testSeveredSegmentShape();
 		testWater();
+		testCanopySettle();
 		testShapeIsKept();
 
 		System.out.println();

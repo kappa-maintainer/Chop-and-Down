@@ -1,0 +1,21 @@
+{
+  "textures": {
+    "particle": "chopdownupdated:block/chopped_log",
+    "end": "chopdownupdated:block/chopped_log",
+    "inside": "chopdownupdated:block/chopped_log"
+  },
+  "elements": [
+    {
+      "from": [ 1, 0, 1 ],
+      "to": [ 15, 16, 15 ],
+      "faces": {
+        "down":  { "texture": "#end", "cullface": "down" },
+        "up":    { "texture": "#end", "cullface": "up" },
+        "north": { "texture": "#inside" },
+        "south": { "texture": "#inside" },
+        "west":  { "texture": "#inside" },
+        "east":  { "texture": "#inside" }
+      }
+    }
+  ]
+}

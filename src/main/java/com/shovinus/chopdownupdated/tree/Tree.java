@@ -38,6 +38,15 @@ public class Tree implements Runnable {
 	BlockPos treeCenter;
 	public World world;
 	public EntityPlayer player;
+	/*
+	 * BOTH mode: the chopped cell (base) is kept as a one-layer chopped-log block
+	 * while the tree rigid-fells, then destroyed with its drops once the fell
+	 * finishes (HT semantics: the chopped cell does not survive the fell).
+	 */
+	public boolean destroyStump = false;
+	/* Original block state of the chopped cell, captured before BOTH mode swaps
+	 * it for a chopped-log block, so the stump drops the right wood item. */
+	public IBlockState stumpOriginalState = null;
 	Boolean main = false;
 	HashMap<BlockPos, Integer> estimatedTree = new HashMap<>();
 	PriorityQueue<BlockPos> queue = new PriorityQueue<>(new BuilderQueueComparer(estimatedTree));
@@ -434,6 +443,12 @@ public class Tree implements Runnable {
 			// The chop layer and everything below it is the retained stump. Only
 			// actual planned sources above that layer are transparent to this scan.
 			boolean movingTreeBlock = p.getY() > base.getY() && movingTreeBlocks.contains(p);
+			// BOTH mode: the chopped stump cell is transparent too, so the trunk
+			// lands beside it on the ground instead of stacking on top of it.
+			if (!movingTreeBlock && p.equals(base)
+					&& state.getBlock() instanceof ht.treechop.api.IChoppableBlock) {
+				movingTreeBlock = true;
+			}
 			// Wood floats. The topmost water block is a support surface, so a trunk or
 			// a canopy block comes to rest on the surface instead of sinking to the
 			// sea floor. Water is replaceable, so this has to be tested before the
@@ -572,7 +587,10 @@ public class Tree implements Runnable {
 			}
 		}
 		trunkMaxRelY = maxRelY;
-		trunkAnimated = trunkCount <= 100;
+		// Trunks up to roughly large oak/jungle size animate as falling-block
+		// entities so the fell is visible; giant trunks (redwood) place directly
+		// to avoid spawning thousands of entities.
+		trunkAnimated = trunkCount <= 400;
 		// The rigid planner computes the center-line pitch after it knows the actual
 		// trunk footprint. Keep this value neutral until then.
 		trunkPitch = 0.0;
@@ -780,6 +798,16 @@ public class Tree implements Runnable {
 		}
 		if (!fallingBlocksList.isEmpty()) {
 			return false;
+		}
+		if (destroyStump) {
+			// The chopped cell survived the fell as a temporary stump; destroy it
+			// with its drops so no chopped-log block is left standing. The drops
+			// come from the original log, not the chopped-log visual.
+			IBlockState stumpState = stumpOriginalState != null ? stumpOriginalState
+					: world.getBlockState(base);
+			Tree.dropDrops(base, base, stumpState, world);
+			world.setBlockState(base, Blocks.AIR.getDefaultState());
+			System.out.println("[ChopDown-DEBUG] bothStumpDestroyed at " + base);
 		}
 		System.out.println("[ChopDown-DEBUG] dropDone trunkPlaced=" + trunkPlaced + " trunkDirect=" + trunkDirect
 				+ " trunkSevered=" + trunkSevered + " listEmpty=" + fallingBlocksList.isEmpty());
@@ -1387,7 +1415,7 @@ public class Tree implements Runnable {
 		boolean log = true;
 		while (log) {
 			pos = pos.add(0, -1, 0);
-			if (!config.isLog(blockName(pos, world))) {
+			if (!isTrunkBlock(world, pos, config)) {
 				log = false;
 				if (!isDraggable(world, pos, config)) {
 					return true;
@@ -1404,20 +1432,30 @@ public class Tree implements Runnable {
 			// were already removed.
 			int below = 0;
 			for (int i = 1; i < config.Min_vertical_logs(); i++) {
-				if (!config.isLog(blockName(choppedPos.add(0, -i, 0), world))) {
+				if (!isTrunkBlock(world, choppedPos.add(0, -i, 0), config)) {
 					break;
 				}
 				below++;
 			}
 			int above = 0;
 			for (int i = 1; i < config.Min_vertical_logs(); i++) {
-				if (!config.isLog(blockName(choppedPos.add(0, i, 0), world))) {
+				if (!isTrunkBlock(world, choppedPos.add(0, i, 0), config)) {
 					break;
 				}
 				above++;
 			}
 			return (1 + below + above) >= config.Min_vertical_logs();
 		}
+	}
+
+	/*
+	 * A trunk block is either a configured log or a chopped cell (BOTH mode).
+	 * Chopped cells must count as trunk wood, otherwise the vertical-run check
+	 * breaks on the cell right below the log the player is hitting.
+	 */
+	private static boolean isTrunkBlock(World world, BlockPos pos, TreeConfiguration config) {
+		return config.isLog(blockName(pos, world))
+				|| world.getBlockState(pos).getBlock() instanceof ht.treechop.api.IChoppableBlock;
 	}
 
 	/*
@@ -1484,6 +1522,13 @@ public class Tree implements Runnable {
 			return true;
 		}
 
+		// A chopped log is the temporary chop-layer cell of the tree being felled
+		// (BOTH mode swaps the cut log for one), so it drags with the tree instead
+		// of blocking the BFS as a solid block.
+		if (state.getBlock() instanceof ht.treechop.api.IChoppableBlock) {
+			return true;
+		}
+
 		if (tree != null) {
 			String name = blockName(pos, world);
 			if (tree.isLog(name) || tree.isLeaf(name)) {
@@ -1504,6 +1549,10 @@ public class Tree implements Runnable {
 		IBlockState state = world.getBlockState(pos);
 
 		if (state.getBlock().isAir(state, world, pos) || state.getBlock().isPassable(world, pos)) {
+			return true;
+		}
+
+		if (state.getBlock() instanceof ht.treechop.api.IChoppableBlock) {
 			return true;
 		}
 

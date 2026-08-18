@@ -32,6 +32,20 @@ public class Config {
 	public static String CATEGORY = "General";
 	public static String MOD_CATEGORY = "Mod Compatibility";
 
+	/*
+	 * How breaking a log behaves. CHOPDOWN fells the whole tree as one rigid
+	 * body (this mod's classic behaviour). TREECHOP uses the embedded HT's
+	 * TreeChop mechanic: one chop per swing, chopped-log blocks, and the tree
+	 * drops once enough chops accumulate. BOTH shows one chop layer on the log
+	 * and then rigid-fells the whole tree, destroying the chopped cell too.
+	 * OFF disables all felling/chopping and falls back to vanilla breaking.
+	 */
+	public enum TreeMode {
+		CHOPDOWN, TREECHOP, BOTH, OFF
+	}
+
+	public static TreeMode treeMode = TreeMode.CHOPDOWN;
+
 	public static boolean breakLeaves;
 	public static int maxDropsPerTickPerTree;
 	public static int maxFallingBlockBeforeManualMove;
@@ -61,18 +75,31 @@ public class Config {
 
 	public static Configuration config;
 
+	/*
+	 * Bump this only when the config structure changes (renamed/removed keys or
+	 * incompatible defaults). It must NOT track the mod version: using
+	 * ChopDown.VERSION here made every mod update rename the config to _old and
+	 * rebuild defaults, silently discarding player edits like treeMode.
+	 */
+	private static final String CONFIG_VERSION = "1";
+
 	public static void load(FMLPreInitializationEvent event) {
-		config = new Configuration(event.getSuggestedConfigurationFile(), ChopDown.VERSION);
+		config = new Configuration(event.getSuggestedConfigurationFile(), CONFIG_VERSION);
 		if (!config.getDefinedConfigVersion().equals(config.getLoadedConfigVersion())) {
 			event.getSuggestedConfigurationFile().renameTo(new File(event.getSuggestedConfigurationFile().getPath() + "_old"));
 
-			config = new Configuration(event.getSuggestedConfigurationFile(), ChopDown.VERSION);
+			config = new Configuration(event.getSuggestedConfigurationFile(), CONFIG_VERSION);
 		}
 		reloadConfig();
 	}
 
 	public static void reloadConfig() {
 
+		treeMode = TreeMode.valueOf(config.getString("treeMode", CATEGORY, TreeMode.CHOPDOWN.name(),
+				"How breaking a log behaves. CHOPDOWN: fell the whole tree as one rigid body. "
+						+ "TREECHOP: HT's TreeChop mechanic, one chop layer per swing, tree drops when enough chops accumulate. "
+						+ "BOTH: chop one layer then rigid-fell the whole tree, destroying the chopped cell. "
+						+ "OFF: vanilla breaking.").toUpperCase());
 		maxDropsPerTickPerTree = config.getInt("maxDropsPerTickPerTree", CATEGORY, 150, 1, 1000000,
 				"Maximum number of blocks to drop per tick for each tree thats falling");
 		maxFallingBlockBeforeManualMove = config.getInt("maxFallingBlockBeforeManualMove", CATEGORY, 1500, 1, 1000000,
