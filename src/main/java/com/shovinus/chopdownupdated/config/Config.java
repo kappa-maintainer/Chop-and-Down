@@ -46,6 +46,13 @@ public class Config {
 
 	public static TreeMode treeMode = TreeMode.CHOPDOWN;
 
+	/*
+	 * Debug logging: off by default, enabled with 'debug=true' in the config
+	 * file. All [ChopDown-DEBUG] console output is gated through debugLog so
+	 * the released mod stays quiet unless someone is troubleshooting.
+	 */
+	public static boolean debug = false;
+
 	public static boolean breakLeaves;
 	public static int maxDropsPerTickPerTree;
 	public static int maxFallingBlockBeforeManualMove;
@@ -115,6 +122,8 @@ public class Config {
 						"clayborn.universalremote.hooks.entity.HookedEntityPlayerMP" },
 				"List of all the player classes allowed to chop down trees, used to distinguish fake and real players");
 
+		debug = config.getBoolean("debug", CATEGORY, false,
+				"Log chop down debug messages to the console.");
 		ignoreTools = config.getStringList("ignoreTools", CATEGORY, new String[] { "tconstruct:lumberaxe:.*" },
 				"List of tools to ignore chop down on, such as tinkers lumberaxe, any tool that veinmines or similar should be ignored for chopdown");
 
@@ -276,6 +285,16 @@ public class Config {
 			}
 		}
 		return d;
+	}
+
+	/*
+	 * Print a debug message only when debug logging is enabled. Non-debug
+	 * messages (config errors, warnings) still use System.out directly.
+	 */
+	public static void debugLog(String message) {
+		if (debug) {
+			System.out.println(message);
+		}
 	}
 
 	private static void GenerateLeavesAndLogs() {

@@ -162,9 +162,84 @@ public class ChopUtil {
                 : tryToChopWithoutFelling(world, blockPos, numChops);
     }
 
+    // Trees up to this many logs are detected with ChopDown's full BFS so the
+    // leaf set covers the whole canopy (TreeChop's own 4-step leaf scan leaves
+    // high clumps behind). Giant trunks fall back to the TreeChop scan.
+    private static final int MAX_CHOPDOWN_DETECTION_BLOCKS = 256;
+
     private static ChopResult getChopResult(World world, BlockPos blockPos, EntityPlayer agent, int numChops, Predicate<BlockPos> logCondition) {
         Set<BlockPos> supportedBlocks = getTreeBlocks(world, blockPos, logCondition, getPlayerChopSettings(agent).getTreesMustHaveLeaves());
-        return chopTree(world, blockPos, supportedBlocks, numChops);
+        List<BlockPos> preDetectedLeaves = null;
+        if (supportedBlocks.size() <= MAX_CHOPDOWN_DETECTION_BLOCKS) {
+            ChopDownDetection detection = detectTreeWithChopDown(world, blockPos);
+            if (detection != null && !detection.logs.isEmpty()) {
+                supportedBlocks = detection.logs;
+                preDetectedLeaves = detection.leaves;
+            }
+        }
+        return chopTree(world, blockPos, supportedBlocks, numChops, preDetectedLeaves);
+    }
+
+    /*
+     * Detects a tree with ChopDown's own BFS (full 3D scan, leaf steps up to the
+     * configured leaf limit) instead of TreeChop's upward-and-horizontal log scan
+     * plus the 4-step leaf scan, so high canopy clumps are not left floating.
+     * Returns null when ChopDown cannot handle the tree (unconfigured wood, build
+     * aborted, giant trunk) and the caller falls back to the TreeChop detection.
+     */
+    public static ChopDownDetection detectTreeWithChopDown(World world, BlockPos pos) {
+        IBlockState state = world.getBlockState(pos);
+        BlockPos basePos = pos;
+        if (state.getBlock() instanceof IChoppableBlock) {
+            // The hit cell is a chopped log: the trunk base is the first real
+            // log above it (chopped cells keep climbing the trunk).
+            BlockPos up = pos;
+            while (true) {
+                up = up.up();
+                if (up.getY() > 255) {
+                    return null;
+                }
+                if (isBlockALog(world, up)) {
+                    if (world.getBlockState(up).getBlock() instanceof IChoppableBlock) {
+                        continue;
+                    }
+                    basePos = up;
+                    break;
+                }
+                return null;
+            }
+        }
+        try {
+            com.shovinus.chopdownupdated.tree.Tree tree = new com.shovinus.chopdownupdated.tree.Tree(basePos, world);
+            if (tree.failedToBuild) {
+                return null;
+            }
+            Set<BlockPos> logs = new HashSet<>();
+            List<BlockPos> leaves = new ArrayList<>();
+            for (Map.Entry<BlockPos, Integer> entry : tree.getEstimatedTree().entrySet()) {
+                if (entry.getValue() == 0) {
+                    logs.add(entry.getKey());
+                } else {
+                    leaves.add(entry.getKey());
+                }
+            }
+            if (logs.isEmpty()) {
+                return null;
+            }
+            return new ChopDownDetection(logs, leaves);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public static class ChopDownDetection {
+        public final Set<BlockPos> logs;
+        public final List<BlockPos> leaves;
+
+        public ChopDownDetection(Set<BlockPos> logs, List<BlockPos> leaves) {
+            this.logs = logs;
+            this.leaves = leaves;
+        }
     }
 
     public static Set<BlockPos> getTreeBlocks(World world, BlockPos blockPos, Predicate<BlockPos> logCondition, boolean mustHaveLeaves) {
@@ -207,7 +282,7 @@ public class ChopUtil {
         return supportedBlocks;
     }
 
-    private static ChopResult chopTree(World world, BlockPos target, Set<BlockPos> supportedBlocks, int numChops) {
+    private static ChopResult chopTree(World world, BlockPos target, Set<BlockPos> supportedBlocks, int numChops, List<BlockPos> preDetectedLeaves) {
         if (supportedBlocks.isEmpty()) {
             return ChopResult.IGNORED;
         }
@@ -248,7 +323,7 @@ public class ChopUtil {
         }
 
         supportedBlocks.remove(target);
-        return new ChopResult(world, Collections.singletonList(target), supportedBlocks);
+        return new ChopResult(world, Collections.singletonList(target), supportedBlocks, preDetectedLeaves);
     }
 
     /**

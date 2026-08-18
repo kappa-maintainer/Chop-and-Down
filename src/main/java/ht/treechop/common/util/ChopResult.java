@@ -26,25 +26,40 @@ public class ChopResult {
 
     private final List<TreeBlock> blocks;
     private final boolean felling;
+    // When ChopDown detected the tree, its full leaf set travels with the
+    // result so felling does not have to re-scan leaves with the limited
+    // TreeChop distance (which leaves high canopy clumps behind).
+    private final List<BlockPos> preDetectedLeaves;
 
     public static final int MAX_NUM_FELLING_EFFECTS = 32;
 
     public ChopResult(List<TreeBlock> blocks, boolean felling) {
-        this.blocks = blocks;
-        this.felling = felling;
+        this(blocks, felling, null);
     }
 
     public ChopResult(List<TreeBlock> blocks) {
-        this(blocks, false);
+        this(blocks, false, null);
+    }
+
+    private ChopResult(List<TreeBlock> blocks, boolean felling, List<BlockPos> preDetectedLeaves) {
+        this.blocks = blocks;
+        this.felling = felling;
+        this.preDetectedLeaves = preDetectedLeaves;
     }
 
     public ChopResult(World world, Collection<BlockPos> chopPositions, Collection<BlockPos> fellPositions) {
+        this(world, chopPositions, fellPositions, null);
+    }
+
+    public ChopResult(World world, Collection<BlockPos> chopPositions, Collection<BlockPos> fellPositions,
+                      List<BlockPos> preDetectedLeaves) {
         this(
                 Stream.of(chopPositions, fellPositions)
                         .flatMap(Collection::stream)
                         .map(pos -> new TreeBlock(world, pos, Blocks.AIR.getDefaultState()))
                         .collect(Collectors.toList()),
-                true
+                true,
+                preDetectedLeaves
         );
     }
 
@@ -76,14 +91,19 @@ public class ChopResult {
         }
 
         List<TreeBlock> leaves = (felling && breakLeaves)
-                ? ChopUtil.getTreeLeaves(
+                ? ((preDetectedLeaves != null)
+                ? preDetectedLeaves.stream()
+                .filter(pos -> ChopUtil.canChangeBlock(pos, agent, ItemStack.EMPTY))
+                .map(pos -> new TreeBlock(world, pos, Blocks.AIR.getDefaultState()))
+                .collect(Collectors.toList())
+                : ChopUtil.getTreeLeaves(
                 world,
                 logs.stream().map(TreeBlock::getPos).collect(Collectors.toList())
         )
                 .stream()
                 .filter(pos -> ChopUtil.canChangeBlock(pos, agent, ItemStack.EMPTY))
                 .map(pos -> new TreeBlock(world, pos, Blocks.AIR.getDefaultState()))
-                .collect(Collectors.toList())
+                .collect(Collectors.toList()))
                 : Lists.newArrayList();
 
         int numLogsAndLeaves = logs.size() + leaves.size();

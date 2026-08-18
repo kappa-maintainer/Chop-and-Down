@@ -1,5 +1,6 @@
 package com.shovinus.chopdownupdated.tree;
 
+import com.shovinus.chopdownupdated.config.Config;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.nbt.NBTBase;
 import net.minecraft.nbt.NBTTagCompound;
@@ -62,7 +63,7 @@ class TreeMovePair {
 		IBlockState state2 = tree.world.getBlockState(to);
 		if (!tree.isAir(to)) {
 			if (Tree.moveReplaceLogged < 30) {
-				System.out.println("[ChopDown-DEBUG] moveReplace to=" + to + " block=" + state2.getBlock()
+				Config.debugLog("[ChopDown-DEBUG] moveReplace to=" + to + " block=" + state2.getBlock()
 						+ " trunk=" + trunk + " leaves=" + leaves);
 				Tree.moveReplaceLogged++;
 			}

@@ -133,7 +133,7 @@ public final class BuiltinTreeConfigs {
 					new TreeConfiguration().setLogs("natura:nether_logs:0").setLeaves("natura:nether_leaves:.*"),
 					new TreeConfiguration().setLogs("natura:nether_logs:1").setLeaves("natura:nether_leaves2:.*"),
 					new TreeConfiguration().setLogs("natura:nether_logs:2").setLeaves("natura:nether_leaves:.*"),
-					new TreeConfiguration().setLogs("natura:nether_logs2:0", "natura:nether_logs2:1").setLeaves("natura:nether_leaves:.*"),
+					new TreeConfiguration().setLogs("natura:nether_logs2:0").setLeaves("natura:nether_leaves:.*").setHanging(true),
 					new TreeConfiguration().setLogs("natura:apple_log:.*").setLeaves("natura:apple_leaves:.*"),
 					new TreeConfiguration().setLogs("natura:overworld_logs:0").setLeaves("natura:overworld_leaves:.*"),
 					new TreeConfiguration().setLogs("natura:overworld_logs:1").setLeaves("natura:overworld_leaves:.*"),

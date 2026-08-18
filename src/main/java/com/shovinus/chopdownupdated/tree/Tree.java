@@ -49,6 +49,15 @@ public class Tree implements Runnable {
 	public IBlockState stumpOriginalState = null;
 	Boolean main = false;
 	HashMap<BlockPos, Integer> estimatedTree = new HashMap<>();
+
+	/*
+	 * Exposed for the embedded TreeChop path (TREECHOP mode): its tree detection
+	 * reuses this BFS so the two systems do not run duplicate scans. Values are
+	 * leaf steps: 0 = log, >0 = leaves.
+	 */
+	public HashMap<BlockPos, Integer> getEstimatedTree() {
+		return estimatedTree;
+	}
 	PriorityQueue<BlockPos> queue = new PriorityQueue<>(new BuilderQueueComparer(estimatedTree));
 	LinkedList<BlockPos> estimatedTreeQueue = new LinkedList<>();
 
@@ -75,6 +84,13 @@ public class Tree implements Runnable {
 	int fallOffset = 0;
 	double trunkPitch = 0;
 	boolean trunkAnimated = true;
+
+	/*
+	 * BOTH mode: the chop count is the fell trigger, so the chop-layer
+	 * cut-through checks (Min_cut_ratio and the layer-above abort) are skipped.
+	 * CHOPDOWN mode keeps requiring the chop layer to be cut through.
+	 */
+	public boolean skipChopLayerCheck = false;
 	int trunkMaxRelY = 0;
 	private int supportScanTop = 0;
 	private boolean trunkSourcesCleared = false;
@@ -259,7 +275,7 @@ public class Tree implements Runnable {
                             continue;
 							} else if (main && log && (leafStep > 0 || dy < 0) && !estimatedTree.containsKey(inspectPos)
 									&& isTrunk && isLog(inspectPos.add(0, 1, 0)) && config.Trunk_Radius() == 1) {
-								System.out.println("[ChopDown-DEBUG] tree build aborted at " + inspectPos
+								Config.debugLog("[ChopDown-DEBUG] tree build aborted at " + inspectPos
 										+ " (other tree not cut through)");
 								estimatedTree.clear();
 								queue.clear();
@@ -279,7 +295,7 @@ public class Tree implements Runnable {
 							if (main && log && ((cantDrag(inspectPos) && !yMatch)
 									|| (yMatch && logAbove && !wentUp)) && leafStep == 0) {
 								if (yMatch && logAbove && !wentUp && !cantDrag(inspectPos)
-										&& config.Min_cut_ratio() > 0.0) {
+										&& !skipChopLayerCheck && config.Min_cut_ratio() > 0.0) {
 									// Partial cut: keep the remaining pillar in the tree and decide
 									// whether the chop layer is cut through enough after the BFS
 									ratioCheckNeeded = true;
@@ -305,7 +321,7 @@ public class Tree implements Runnable {
 										// holds at least as many logs as the chop layer; otherwise fall
 										// through to the exact check after the full BFS
 										if (quickT >= quickR && quickR > (int) Math.floor(quickT * (1.0 - config.Min_cut_ratio()))) {
-											System.out.println("[ChopDown-DEBUG] tree build aborted (quick partial cut: " + quickR
+											Config.debugLog("[ChopDown-DEBUG] tree build aborted (quick partial cut: " + quickR
 													+ " of " + quickT + " logs at chop layer, allowed "
 													+ (int) Math.floor(quickT * (1.0 - config.Min_cut_ratio())) + ")");
 											estimatedTree.clear();
@@ -314,8 +330,8 @@ public class Tree implements Runnable {
 											return;
 										}
 									}
-								} else {
-									System.out.println("[ChopDown-DEBUG] tree build aborted at " + inspectPos
+								} else if (!(skipChopLayerCheck && yMatch && logAbove && !wentUp)) {
+									Config.debugLog("[ChopDown-DEBUG] tree build aborted at " + inspectPos
 											+ (cantDrag(inspectPos) && !yMatch ? " (blocked by solid block)"
 													: " (log not cut through at chop level)"));
 									if (cantDrag(inspectPos) && !yMatch) {
@@ -327,7 +343,7 @@ public class Tree implements Runnable {
 									return;
 								}
 							}
-                        if (!yMatch || !cantDrag(inspectPos)) {
+                        if (!yMatch || !cantDrag(inspectPos) || skipChopLayerCheck) {
 							if (log && !estimatedTree.containsKey(inspectPos)) {
 								layerLogs.merge(inspectPos.getY(), 1, Integer::sum);
 							}
@@ -350,14 +366,14 @@ public class Tree implements Runnable {
 			}
 			int allowed = (int) Math.floor(maxCount * (1.0 - config.Min_cut_ratio()));
 			if (baseCount > allowed) {
-				System.out.println("[ChopDown-DEBUG] tree build aborted (partial cut: " + baseCount
+				Config.debugLog("[ChopDown-DEBUG] tree build aborted (partial cut: " + baseCount
 						+ " of " + maxCount + " logs still at chop layer, allowed " + allowed + ")");
 				estimatedTree.clear();
 				queue.clear();
 				failedToBuild = true;
 				return;
 			}
-			System.out.println("[ChopDown-DEBUG] partial cut accepted: " + baseCount + " of " + maxCount
+			Config.debugLog("[ChopDown-DEBUG] partial cut accepted: " + baseCount + " of " + maxCount
 					+ " logs still at chop layer (allowed " + allowed + ")");
 		}
 
@@ -422,8 +438,16 @@ public class Tree implements Runnable {
 			run++;
 			p = p.add(0, -1, 0);
 		}
-		return run >= 4;
+		boolean isTrunk = run >= 4;
+		if (trunkRunLogged < 20) {
+			trunkRunLogged++;
+			Config.debugLog("[ChopDown-DEBUG] trunkRun pos=" + pos + " center=" + treeCenter + " cheb="
+					+ Math.max(Math.abs(dx), Math.abs(dz)) + " r=" + r + " run=" + run + " trunk=" + isTrunk);
+		}
+		return isTrunk;
 	}
+
+	private int trunkRunLogged = 0;
 
 	/*
 	 * Terrain support at an absolute horizontal position. Only blocks included in
@@ -540,7 +564,7 @@ public class Tree implements Runnable {
 				layerLogCount.merge(p.getY(), 1, Integer::sum);
 			}
 		}
-		System.out.println("[ChopDown-DEBUG] est pillars=" + estPillar + " layers=" + layerLogCount);
+		Config.debugLog("[ChopDown-DEBUG] est pillars=" + estPillar + " layers=" + layerLogCount);
 		estimatedTreeQueue = new LinkedList<BlockPos>(estimatedTree.keySet());
 		LinkedList<BlockPos> realisticTree = new LinkedList<BlockPos>();
 		while (!estimatedTreeQueue.isEmpty()) {
@@ -644,7 +668,7 @@ public class Tree implements Runnable {
 				}
 				lastTrunkTo = pair.to;
 				if (trunkSample < 10) {
-					System.out.println("[ChopDown-DEBUG] trunkBlock from=" + pair.from + " to=" + pair.to);
+					Config.debugLog("[ChopDown-DEBUG] trunkBlock from=" + pair.from + " to=" + pair.to);
 					trunkSample++;
 				}
 			} else {
@@ -654,7 +678,7 @@ public class Tree implements Runnable {
 				}
 			}
 		}
-		System.out.println("[ChopDown-DEBUG] shape: base=" + base + " treeCenter=" + treeCenter + " fallX=" + fallX
+		Config.debugLog("[ChopDown-DEBUG] shape: base=" + base + " treeCenter=" + treeCenter + " fallX=" + fallX
 				+ " fallZ=" + fallZ + " trunk=" + trunkTotal + " leaf=" + leafCount + " nonTrunkLogs=" + nonTrunkLogs
 				+ " pitch=" + trunkPitch + " animated=" + trunkAnimated + " pillars=" + pillarCount + " pillarTos="
 				+ pillarFirstTo + " firstTo=" + firstTrunkTo + " lastTo=" + lastTrunkTo);
@@ -697,7 +721,7 @@ public class Tree implements Runnable {
 		TrunkPlanner.Plan plan = TrunkPlanner.plan(solution,
 				target -> isTrunkTargetBlocked(toBlockPos(target)));
 		if (plan.hasDuplicateTarget()) {
-			System.out.println(
+			Config.debugLog(
 					"[ChopDown-DEBUG] rigid trunk target collision at " + plan.duplicateTarget());
 			failedToBuild = true;
 			return;
@@ -708,7 +732,7 @@ public class Tree implements Runnable {
 			BlockPos from = toBlockPos(decision.source());
 			BlockPos target = toBlockPos(decision.target());
 			if (fallingBlocks.containsKey(target)) {
-				System.out.println("[ChopDown-DEBUG] rigid trunk target collision from=" + from
+				Config.debugLog("[ChopDown-DEBUG] rigid trunk target collision from=" + from
 						+ " to=" + target);
 				failedToBuild = true;
 				return;
@@ -734,7 +758,7 @@ public class Tree implements Runnable {
 				trunkTargets.add(pair.to);
 			}
 		}
-		System.out.println("[ChopDown-DEBUG] rigidTrunk rootSupport=" + solution.rootSupport()
+		Config.debugLog("[ChopDown-DEBUG] rigidTrunk rootSupport=" + solution.rootSupport()
 				+ " advance=" + shape.rootAdvance() + " minHeight=" + shape.minHeight()
 				+ " vMin=" + shape.verticalMin() + " thick=" + shape.thickness()
 				+ " sections=" + shape.sectionCount() + " emptySections=" + shape.emptySteps()
@@ -762,7 +786,7 @@ public class Tree implements Runnable {
 			this.getDropBlocks();
 		} catch (Exception e) {
 			this.failedToBuild = true;
-			System.out.println("[ChopDown-DEBUG] tree calculation failed: " + e);
+			Config.debugLog("[ChopDown-DEBUG] tree calculation failed: " + e);
 		}
 	}
 
@@ -807,9 +831,9 @@ public class Tree implements Runnable {
 					: world.getBlockState(base);
 			Tree.dropDrops(base, base, stumpState, world);
 			world.setBlockState(base, Blocks.AIR.getDefaultState());
-			System.out.println("[ChopDown-DEBUG] bothStumpDestroyed at " + base);
+			Config.debugLog("[ChopDown-DEBUG] bothStumpDestroyed at " + base);
 		}
-		System.out.println("[ChopDown-DEBUG] dropDone trunkPlaced=" + trunkPlaced + " trunkDirect=" + trunkDirect
+		Config.debugLog("[ChopDown-DEBUG] dropDone trunkPlaced=" + trunkPlaced + " trunkDirect=" + trunkDirect
 				+ " trunkSevered=" + trunkSevered + " listEmpty=" + fallingBlocksList.isEmpty());
 		return true;
 	}
@@ -951,7 +975,7 @@ public class Tree implements Runnable {
 			carved++;
 		}
 		if (carved > 0 || refused > 0) {
-			System.out.println("[ChopDown-DEBUG] trunkEmbed carved=" + carved + " refused="
+			Config.debugLog("[ChopDown-DEBUG] trunkEmbed carved=" + carved + " refused="
 					+ refused + " planned=" + trunkEmbedded.size());
 		}
 		LinkedList<TreeMovePair> trunkPairs = new LinkedList<>();
@@ -1050,7 +1074,7 @@ public class Tree implements Runnable {
 	private boolean drop(TreeMovePair pair, Boolean UseSolid) {
 		if (!pair.sourceCleared && !(isLog(pair.from) || isLeaf(pair.from))) {
 			if (vanishedLogged < 20) {
-				System.out.println("[ChopDown-DEBUG] vanished from=" + pair.from + " to=" + pair.to + " leaves="
+				Config.debugLog("[ChopDown-DEBUG] vanished from=" + pair.from + " to=" + pair.to + " leaves="
 						+ pair.leaves + " trunk=" + pair.trunk + " block="
 						+ world.getBlockState(pair.from).getBlock());
 				vanishedLogged++;
@@ -1058,7 +1082,7 @@ public class Tree implements Runnable {
 			return true;
 		}
 		if (!pair.leaves && !pair.trunk && nonTrunkLogged < 8) {
-			System.out.println("[ChopDown-DEBUG] branchLog from=" + pair.from + " to=" + pair.to + " useSolid="
+			Config.debugLog("[ChopDown-DEBUG] branchLog from=" + pair.from + " to=" + pair.to + " useSolid="
 					+ UseSolid);
 			nonTrunkLogged++;
 		}
@@ -1087,7 +1111,7 @@ public class Tree implements Runnable {
 				// Planned occlusion drops at the contact point the fibre stopped on.
 				BlockPos dropAt = pair.dropAt != null ? pair.dropAt : pair.to;
 				if (dropToItemLogged < 20) {
-					System.out.println("[ChopDown-DEBUG] trunkBlocked from=" + pair.from + " to=" + pair.to
+					Config.debugLog("[ChopDown-DEBUG] trunkBlocked from=" + pair.from + " to=" + pair.to
 							+ " dropAt=" + dropAt + " planned=" + pair.dropAsItem + " at="
 							+ world.getBlockState(pair.to).getBlock());
 					dropToItemLogged++;
@@ -1105,7 +1129,7 @@ public class Tree implements Runnable {
 				// check above is the safety net: if the world changed and the target
 				// is no longer free, that log drops as an item.
 				if (severedLogged < 20) {
-					System.out.println("[ChopDown-DEBUG] severedPlace from=" + pair.from + " to=" + pair.to);
+					Config.debugLog("[ChopDown-DEBUG] severedPlace from=" + pair.from + " to=" + pair.to);
 					severedLogged++;
 				}
 				trunkSevered++;
@@ -1115,7 +1139,7 @@ public class Tree implements Runnable {
 				// Large trees and the canopy sections of the trunk are placed directly:
 				// animating them would leave falling blocks in the path of the canopy
 				if (directPlaceLogged < 20) {
-					System.out.println("[ChopDown-DEBUG] directPlace from=" + pair.from + " to=" + pair.to
+					Config.debugLog("[ChopDown-DEBUG] directPlace from=" + pair.from + " to=" + pair.to
 							+ " below=" + world.getBlockState(pair.to.down()).getBlock() + " at="
 							+ world.getBlockState(pair.to));
 					directPlaceLogged++;
@@ -1151,7 +1175,7 @@ public class Tree implements Runnable {
 		// config is set to break leaves then do drops and state finished
 		if ((!CanMoveTo(pair.to,!pair.leaves) && !pair.moved) || (isLeaf(pair.from) && Config.breakLeaves)) {
 			if (dropToItemLogged < 20) {
-				System.out.println("[ChopDown-DEBUG] dropToItem from=" + pair.from + " to=" + pair.to + " leaves="
+				Config.debugLog("[ChopDown-DEBUG] dropToItem from=" + pair.from + " to=" + pair.to + " leaves="
 						+ pair.leaves + " trunk=" + pair.trunk + " canMove=" + CanMoveTo(pair.to, !pair.leaves));
 				dropToItemLogged++;
 			}
@@ -1202,7 +1226,7 @@ public class Tree implements Runnable {
 			breakLeafAt(pair.to);
 			if(!isAir(pair.to)) {
 				if (manualClearLogged < 20) {
-					System.out.println("[ChopDown-DEBUG] manualClear from=" + pair.from + " cleared=" + pair.to
+					Config.debugLog("[ChopDown-DEBUG] manualClear from=" + pair.from + " cleared=" + pair.to
 							+ " block=" + world.getBlockState(pair.to).getBlock() + " leaves=" + pair.leaves
 							+ " trunk=" + pair.trunk);
 					manualClearLogged++;
@@ -1410,6 +1434,13 @@ public class Tree implements Runnable {
 	 */
 	public static final Boolean isTrunk(BlockPos pos, World world, TreeConfiguration config) {
 
+		// Hanging (upside-down) trees hang from a ceiling: there is no ground
+		// check to pass, the downward run ends in open air or a lava pool.
+		// The config flag is the tree marker.
+		if (config != null && config.Hanging()) {
+			return true;
+		}
+
 		// Normal tree check, requires the tree to be sat on a solid block
 		BlockPos choppedPos = pos;
 		boolean log = true;
@@ -1467,6 +1498,9 @@ public class Tree implements Runnable {
 	}
 
 	private boolean calculateIsTrunk(BlockPos pos) {
+		if (config != null && config.Hanging()) {
+			return true;
+		}
 		BlockPos choppedPos = pos;
 		boolean log = true;
 		BlockPos inspect = pos;

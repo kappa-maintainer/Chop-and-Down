@@ -47,6 +47,12 @@ public class TreeConfiguration {
 	private int trunk_radius = 1;
 	private int min_vertical_logs = 0;
 	private Double min_cut_ratio;
+	/*
+	 * Hanging (upside-down) trees such as natura bloodwood grow downward from a
+	 * ceiling. When marked, felling searches downward instead of upward and the
+	 * hanging part drops vertically.
+	 */
+	private boolean hanging = false;
 	private List<String> logs;
 	private List<String> leaves;
 	private transient String[] leaves_merged;
@@ -82,6 +88,15 @@ public class TreeConfiguration {
 	 * Set the partial cut ratio. Only written to the built in json configs of
 	 * thick trunks (trunk_radius > 1); thin trunks keep the whole layer rule.
 	 */
+	public boolean Hanging() {
+		return hanging;
+	}
+
+	public TreeConfiguration setHanging(boolean hanging) {
+		this.hanging = hanging;
+		return this;
+	}
+
 	public TreeConfiguration setMinCutRatio(double ratio) {
 		this.min_cut_ratio = ratio;
 		return this;
@@ -151,11 +166,13 @@ public class TreeConfiguration {
 			}
 		}
 		leaves_merged = null;
+		hanging = hanging || newTree.hanging;
 	}
 	public TreeConfiguration Clone() {
 		TreeConfiguration clone = new TreeConfiguration(radius, leaf_limit, min_vertical_logs, trunk_radius,
 				Config.ConvertListToArray(Logs()), Config.ConvertListToArray(LeavesList()));
 		clone.min_cut_ratio = this.min_cut_ratio;
+		clone.hanging = this.hanging;
 		return clone;
 	}
 }

@@ -104,8 +104,21 @@ public class ChopDown {
 		BlockPos pos = event.getPos();
 		EntityPlayer player = event.getPlayer();
 
+		// Hanging trees (natura bloodwood) grow downward from a ceiling. They are
+		// marked in the tree config. CHOPDOWN keeps the direct downward fell
+		// (there is no upward trunk pipeline for them); BOTH runs the normal
+		// chop-layer mechanic and only the fell itself goes downward, handled
+		// in handleBoth/fellBoth.
+		TreeConfiguration hangingConfig = Tree.findConfig(world, pos);
+		if (Config.treeMode == Config.TreeMode.CHOPDOWN && hangingConfig != null && hangingConfig.Hanging()
+				&& Tree.isWood(pos, world)) {
+			Config.debugLog("[ChopDown-DEBUG] hanging: fell at " + pos + " name=" + Tree.blockName(pos, world));
+			fellHangingTree(event, world, pos, player, hangingConfig, pos);
+			return;
+		}
+
 		if (Config.treeMode == Config.TreeMode.BOTH) {
-			System.out.println("[ChopDown-DEBUG] both entry: pos=" + pos + " state="
+			Config.debugLog("[ChopDown-DEBUG] both entry: pos=" + pos + " state="
 					+ Tree.blockName(pos, world) + " mode=" + Config.treeMode);
 			handleBoth(event, world, pos, player);
 			return;
@@ -124,6 +137,11 @@ public class ChopDown {
 		BlockPos playerStanding = player.getPosition();
 		if (config == null || !Tree.isTrunk(pos, world, config) || !Tree.isWood(pos.add(0, 1, 0), world)
 				|| (playerStanding.getX() == 0 && playerStanding.getZ() == 0)) {
+			Config.debugLog("[ChopDown-DEBUG] chopdown: not a fellable trunk at " + pos + " name="
+					+ Tree.blockName(pos, world) + " config=" + (config != null)
+					+ " isTrunk=" + (config != null && Tree.isTrunk(pos, world, config))
+					+ " upWood=" + Tree.isWood(pos.add(0, 1, 0), world)
+					+ " atOrigin=" + (playerStanding.getX() == 0 && playerStanding.getZ() == 0));
 			return;
 		}
 
@@ -162,6 +180,133 @@ public class ChopDown {
 	}
 
 	/*
+	 * Hanging (upside-down) tree: the hit log is part of a trunk that grows
+	 * downward from a ceiling. Everything from the hit point down (trunk and
+	 * canopy) is released as falling blocks that drop vertically to the floor;
+	 * the section above the cut (attached to the ceiling) stays.
+	 *
+	 * In BOTH mode this is called once the chop layer is fully chopped (each
+	 * cell holds its two chop layers), so the chop mechanic is respected and
+	 * the fell itself just goes downward instead of through the upward-growing
+	 * trunk pipeline. Chopped cells of the fell range are restored to the
+	 * trunk log first.
+	 */
+	private void fellHangingTree(BlockEvent.BreakEvent event, World world, BlockPos pos, EntityPlayer player,
+			TreeConfiguration config, BlockPos basePos) {
+		try {
+			// Search downward from the cut: the hanging trunk, the chopped
+			// cells of the chop layer and the canopy. Sideways cells of the
+			// same layer (2x2 trunks) are included.
+			java.util.Set<BlockPos> tree = new java.util.HashSet<>();
+			java.util.ArrayDeque<BlockPos> queue = new java.util.ArrayDeque<>();
+			queue.add(pos);
+			while (!queue.isEmpty()) {
+				BlockPos p = queue.poll();
+				if (tree.contains(p) || p.getY() <= 0) {
+					continue;
+				}
+				String name = Tree.blockName(p, world);
+				boolean choppedCell = world.getBlockState(p)
+						.getBlock() instanceof ht.treechop.api.IChoppableBlock;
+				if (!config.isLog(name) && !config.isLeaf(name) && !choppedCell) {
+					continue;
+				}
+				tree.add(p);
+				// Expand sideways on the same layer and downward only; the
+				// ceiling-side section above the cut is not part of the drop.
+				BlockPos[] neighbors = { p.down(), p.east(), p.west(), p.north(), p.south() };
+				for (BlockPos n : neighbors) {
+					if (n.getY() <= pos.getY()) {
+						queue.add(n);
+					}
+				}
+			}
+			event.setCanceled(true);
+
+			// Restore every chopped cell of the fell range back to the trunk
+			// log so the whole tree falls as regular wood.
+			IBlockState trunkState = world.getBlockState(basePos);
+			for (BlockPos p : tree) {
+				if (world.getBlockState(p).getBlock() instanceof ht.treechop.api.IChoppableBlock) {
+					world.setBlockState(p, trunkState, 2);
+				}
+			}
+
+			// Release from the lowest block up. Each block flies to the first
+			// solid spot below it; liquids (lava pools in nether caverns) act
+			// as a surface, so the tree rests on top of the lava instead of
+			// sinking into it and despawning. The whole fell range is cleared
+			// first so the landing scan looks through open air (a targeted
+			// falling block does not verify its origin block, unlike the
+			// vanilla entity, so clearing first is safe here).
+			java.util.List<BlockPos> sorted = new java.util.ArrayList<>(tree);
+			sorted.sort(java.util.Comparator.comparingInt(BlockPos::getY));
+			java.util.List<IBlockState> states = new java.util.ArrayList<>();
+			for (BlockPos p : sorted) {
+				states.add(world.getBlockState(p));
+			}
+			for (BlockPos p : sorted) {
+				world.setBlockState(p, net.minecraft.init.Blocks.AIR.getDefaultState(), 3);
+			}
+			// Every block gets its own unique landing spot: blocks sharing a
+			// column stack upward from the surface instead of turning into
+			// item drops (which a lava pool burns up instantly). Leaves are
+			// placed non-decaying so a stacked canopy survives without trunk
+			// support.
+			java.util.Map<Long, Integer> stackHeights = new java.util.HashMap<>();
+			for (int i = 0; i < sorted.size(); i++) {
+				IBlockState st = states.get(i);
+				if (st.getBlock() == net.minecraft.init.Blocks.AIR) {
+					continue;
+				}
+				BlockPos landing = findLandingPos(world, sorted.get(i));
+				long key = ((long) landing.getX() << 32) | (landing.getZ() & 0xFFFFFFFFL);
+				int h = stackHeights.getOrDefault(key, 0);
+				landing = landing.add(0, h, 0);
+				stackHeights.put(key, h + 1);
+				if (st.getBlock() instanceof net.minecraft.block.BlockLeaves) {
+					st = st.withProperty(net.minecraft.block.BlockLeaves.DECAYABLE, false);
+				}
+				// isLog=false skips clearLeavesOnPath so the canopy falls as
+				// whole blocks instead of being turned into items early.
+				TargetedFallingBlock fallingBlock = new TargetedFallingBlock(world,
+						sorted.get(i).getX() + 0.5, sorted.get(i).getY() + 0.5, sorted.get(i).getZ() + 0.5,
+						st, null, false, landing);
+				world.spawnEntity(fallingBlock);
+			}
+		} catch (Exception e) {
+			player.sendMessage(new TextComponentString("Can't find a tree configuration for this log."));
+		}
+	}
+
+	/*
+	 * First resting spot under the block: air lets it pass, a solid block
+	 * stops it, and a liquid (water or lava) counts as a surface so the block
+	 * floats on top of it instead of sinking in and despawning.
+	 */
+	private BlockPos findLandingPos(World world, BlockPos p) {
+		BlockPos landing = p;
+		while (landing.getY() > 1) {
+			BlockPos below = landing.down();
+			IBlockState belowState = world.getBlockState(below);
+			net.minecraft.block.Block b = belowState.getBlock();
+			if (b.isAir(belowState, world, below)) {
+				landing = below;
+				continue;
+			}
+			if (b instanceof net.minecraft.block.BlockLiquid) {
+				break;
+			}
+			if (b.isPassable(world, below)) {
+				landing = below;
+				continue;
+			}
+			break;
+		}
+		return landing;
+	}
+
+	/*
 	 * BOTH mode: HT's chop-accumulation mechanic drives the visuals (one chop
 	 * layer per swing, chopping continues until the tree has taken enough
 	 * chops), but when the threshold is reached ChopDown rigid-fells the whole
@@ -175,13 +320,13 @@ public class ChopDown {
 
 		// Only logs and chopped logs are handled; everything else is vanilla.
 		if (!isChopped && !ht.treechop.common.util.ChopUtil.isBlockChoppable(world, pos, originalState)) {
-			System.out.println("[ChopDown-DEBUG] both: not choppable at " + pos + " state="
+			Config.debugLog("[ChopDown-DEBUG] both: not choppable at " + pos + " state="
 					+ Tree.blockName(pos, world));
 			return;
 		}
 		if (player.getHeldItemMainhand() != null
 				&& Config.MatchesTool(Tree.stackName(player.getHeldItemMainhand()))) {
-			System.out.println("[ChopDown-DEBUG] both: tool match, vanilla break at " + pos);
+			Config.debugLog("[ChopDown-DEBUG] both: tool match, vanilla break at " + pos);
 			return;
 		}
 
@@ -194,7 +339,7 @@ public class ChopDown {
 			while (true) {
 				up = up.add(0, 1, 0);
 				if (up.getY() > world.getHeight()) {
-					System.out.println("[ChopDown-DEBUG] both: no trunk above chopped cell at " + pos);
+					Config.debugLog("[ChopDown-DEBUG] both: no trunk above chopped cell at " + pos);
 					return;
 				}
 				if (Tree.isWood(up, world)) {
@@ -202,7 +347,7 @@ public class ChopDown {
 					break;
 				}
 				if (!(world.getBlockState(up).getBlock() instanceof ht.treechop.api.IChoppableBlock)) {
-					System.out.println("[ChopDown-DEBUG] both: chopped cell " + pos + " has non-tree above at "
+					Config.debugLog("[ChopDown-DEBUG] both: chopped cell " + pos + " has non-tree above at "
 							+ up + " (" + Tree.blockName(up, world) + ")");
 					return;
 				}
@@ -216,9 +361,8 @@ public class ChopDown {
 		// other choppable wood falls back to the full HT behaviour (chop layers,
 		// and HT's instant fell once the chop count is met).
 		TreeConfiguration config = Tree.findConfig(world, basePos);
-		if (config == null || !Tree.isTrunk(basePos, world, config)) {
-			System.out.println("[ChopDown-DEBUG] both: NOT a fellable trunk (config=" + (config != null)
-					+ ") at base=" + basePos + " -> HT fallback");
+		if (config == null) {
+			Config.debugLog("[ChopDown-DEBUG] both: no tree config for " + basePos + " -> HT fallback");
 			ht.treechop.common.util.ChopResult result = ht.treechop.common.util.ChopUtil.getChopResult(world, pos,
 					player, numChops, true, p -> ht.treechop.common.util.ChopUtil.isBlockALog(world, p));
 			if (result != ht.treechop.common.util.ChopResult.IGNORED && result.apply(pos, player, tool,
@@ -227,61 +371,149 @@ public class ChopDown {
 			}
 			return;
 		}
+		// A stump, a single log or a fallen log has nothing above it: it is not
+		// a tree, so it keeps the vanilla behaviour instead of showing chop
+		// layers. The block above the base may be a log or leaves: a short tree
+		// (natura hopseed) tops out straight into the canopy, and the canopy is
+		// part of the tree.
+		// Hanging trees skip the trunk/above checks entirely: the config flag
+		// is the tree marker, the trunk top sits against the ceiling so the
+		// block above the base is netherrack, and the downward run ends in
+		// open air or lava (isTrunk already short-circuits for them). Without
+		// this, chopping a chopped cell walks the base up to the trunk top and
+		// the ceiling fails the above-is-tree check.
+		if (!config.Hanging()) {
+			BlockPos abovePos = basePos.add(0, 1, 0);
+			boolean aboveIsTree = Tree.isWood(abovePos, world) || Tree.isLeaves(abovePos, world);
+			if (!Tree.isTrunk(basePos, world, config) || !aboveIsTree) {
+				Config.debugLog("[ChopDown-DEBUG] both: not a tree at base=" + basePos + " (above="
+						+ Tree.blockName(abovePos, world) + ") -> vanilla break");
+				return;
+			}
+		}
 
 		// A fell already in progress blocks further chops.
 		for (Tree tree : FallingTrees) {
 			if (tree.player == player && !tree.failedToBuild) {
 				if (!tree.finishedCalculation) {
-					System.out.println("[ChopDown-DEBUG] both: fell calculating, skip");
+					Config.debugLog("[ChopDown-DEBUG] both: fell calculating, skip");
 					return;
 				}
-				System.out.println("[ChopDown-DEBUG] both: fell in progress, skip");
+				Config.debugLog("[ChopDown-DEBUG] both: fell in progress, skip");
 				player.sendMessage(new TextComponentString("Still chopping down the last tree"));
 				event.setCanceled(true);
 				return;
 			}
 		}
 
-		// HT chop accounting: how many chops the tree needs, and how many chops
-		// are already stored in the tree's chopped cells.
-		java.util.Set<BlockPos> treeBlocks = ht.treechop.common.util.ChopUtil.getTreeBlocks(world, basePos,
-				p -> ht.treechop.common.util.ChopUtil.isBlockALog(world, p), false);
-		int numChopsToFell = ht.treechop.common.util.ChopUtil.numChopsToFell(treeBlocks.size());
-		java.util.Set<BlockPos> nearby = ht.treechop.common.util.ChopUtil.getConnectedBlocks(
-				java.util.Collections.singletonList(basePos),
-				p -> ht.treechop.common.util.BlockNeighbors.ADJACENTS_AND_DIAGONALS.asStream(p)
-						.filter(q -> Math.abs(q.getY() - p.getY()) < 4
-								&& ht.treechop.common.util.ChopUtil.isBlockChoppable(world, q)),
-				64);
-		int currentChops = ht.treechop.common.util.ChopUtil.getNumChops(world, nearby);
-
-		System.out.println("[ChopDown-DEBUG] both: pos=" + pos + " chopped=" + isChopped + " base=" + basePos
-				+ " config=" + (config != null ? "Y" : "N") + " treeBlocks=" + treeBlocks.size()
-				+ " toFell=" + numChopsToFell + " chops=" + currentChops + " +" + numChops);
-
-		if (currentChops + numChops < numChopsToFell) {
-			// Not enough chops yet: add another chop layer (HT visual) and keep
-			// the cell standing.
-			nearby.remove(pos);
-			ht.treechop.common.util.ChopResult result = ht.treechop.common.util.ChopUtil
-					.gatherChops(world, pos, numChops, nearby);
-			if (result != ht.treechop.common.util.ChopResult.IGNORED) {
-				result.apply(pos, player, tool, false);
-				event.setCanceled(true);
+		// BOTH chop mechanic: every cell of the chop layer takes at most two
+		// chops - the first shows the in-between chopped state, the second
+		// fills it. Once the hit cell is full, further swings spill the chop
+		// HORIZONTALLY to the nearest unfilled cell of the same layer, so a
+		// thick trunk fills its whole outer ring without the player having to
+		// hit every cell. The tree rigid-fells when every peripheral cell of
+		// the layer is filled.
+		int r = config.Trunk_Radius();
+		if (ht.treechop.common.util.ChopUtil.getNumChops(world, pos) < 2) {
+			IBlockState chopped = ht.treechop.common.util.ChopUtil
+					.getBlockStateAfterChops(world, pos, 1, false);
+			IBlockState stateNow = world.getBlockState(pos);
+			if (chopped != stateNow) {
+				world.setBlockState(pos, chopped, 3);
 			}
-			return;
+		} else {
+			spillChopLayer(world, pos, config, r);
 		}
+		event.setCanceled(true);
 
-		// Enough chops: rigid-fell the whole tree with ChopDown's falling
-		// blocks instead of HT's instant destruction.
+		// Is the chop layer fully chopped? Every peripheral cell of the trunk
+		// cross-section at this height must hold two chop layers.
+		int layerTotal = 0;
+		int layerFull = 0;
+		for (int qx = -r; qx <= r; qx++) {
+			for (int qz = -r; qz <= r; qz++) {
+				BlockPos p = pos.add(qx, 0, qz);
+				if (!isChopLayerCell(world, p, config)) {
+					continue;
+				}
+				layerTotal++;
+				if (ht.treechop.common.util.ChopUtil.getNumChops(world, p) >= 2) {
+					layerFull++;
+				}
+			}
+		}
+		Config.debugLog("[ChopDown-DEBUG] both: pos=" + pos + " chopped=" + isChopped + " base=" + basePos
+				+ " config=" + (config != null ? "Y" : "N") + " layerFull=" + layerFull + "/" + layerTotal);
+
+		if (layerTotal > 0 && layerFull >= layerTotal) {
+			if (config.Hanging()) {
+				fellHangingTree(event, world, pos, player, config, basePos);
+			} else {
+				fellBoth(event, world, pos, player, originalState, basePos);
+			}
+		}
+	}
+
+	/*
+	 * A chop-layer cell: a configured log or chopped cell of the trunk
+	 * cross-section, excluding interior cells of a very thick trunk (they are
+	 * not chopable and do not have to be chopped for the tree to fall).
+	 */
+	private boolean isChopLayerCell(World world, BlockPos p, TreeConfiguration config) {
+		IBlockState st = world.getBlockState(p);
+		boolean isTreeCell = config.isLog(Tree.blockName(p, world))
+				|| st.getBlock() instanceof ht.treechop.api.IChoppableBlock;
+		if (!isTreeCell) {
+			return false;
+		}
+		return ht.treechop.common.util.ChopUtil.isBlockChoppable(world, p, st)
+				|| st.getBlock() instanceof ht.treechop.api.IChoppableBlock;
+	}
+
+	/*
+	 * The hit cell already holds two chop layers; spill one more layer to the
+	 * nearest unfilled peripheral cell of the same layer, searching outward in
+	 * rings. Horizontal only: the chop never crawls up the trunk.
+	 */
+	private void spillChopLayer(World world, BlockPos pos, TreeConfiguration config, int r) {
+		for (int radius = 1; radius <= r; radius++) {
+			for (int qx = -radius; qx <= radius; qx++) {
+				for (int qz = -radius; qz <= radius; qz++) {
+					if (Math.max(Math.abs(qx), Math.abs(qz)) != radius) {
+						continue;
+					}
+					BlockPos p = pos.add(qx, 0, qz);
+					if (!isChopLayerCell(world, p, config)) {
+						continue;
+					}
+					if (ht.treechop.common.util.ChopUtil.getNumChops(world, p) < 2) {
+						IBlockState chopped = ht.treechop.common.util.ChopUtil
+								.getBlockStateAfterChops(world, p, 1, false);
+						IBlockState stateNow = world.getBlockState(p);
+						if (chopped != stateNow) {
+							world.setBlockState(p, chopped, 3);
+						}
+						return;
+					}
+				}
+			}
+		}
+	}
+
+	/*
+	 * The chop layer is fully chopped: rigid-fell the whole tree with
+	 * ChopDown's falling blocks. Every chopped cell of the tree is restored to
+	 * the trunk log for the fell (the Tree constructor needs a configured log
+	 * at the base and the felling BFS breaks on chopped cells), and the stump
+	 * cell is destroyed, dropping the log, once the fell completes.
+	 */
+	private void fellBoth(BlockEvent.BreakEvent event, World world, BlockPos pos, EntityPlayer player,
+			IBlockState originalState, BlockPos basePos) {
 		try {
+			java.util.Set<BlockPos> treeBlocks = ht.treechop.common.util.ChopUtil.getTreeBlocks(world, pos,
+					p -> ht.treechop.common.util.ChopUtil.isBlockALog(world, p), false);
 			IBlockState fellStumpState = originalState;
-			if (isChopped) {
-				// The Tree constructor needs a configured log at the base, so
-				// every chopped cell of the tree is restored to the trunk log
-				// for the fell; otherwise the felling BFS breaks on the first
-				// chopped cell. The stump cell is destroyed (dropping the log)
-				// once the fell completes.
+			if (originalState.getBlock() instanceof ht.treechop.api.IChoppableBlock) {
 				IBlockState trunkState = world.getBlockState(basePos);
 				for (BlockPos bp : treeBlocks) {
 					if (world.getBlockState(bp).getBlock() instanceof ht.treechop.api.IChoppableBlock) {
@@ -292,12 +524,16 @@ public class ChopDown {
 				fellStumpState = trunkState;
 			}
 			Tree tree = new Tree(pos, world, player);
+			// BOTH: a fully chopped chop layer is the fell trigger, not the
+			// chop-layer cut ratio. A thick trunk (e.g. natura hopseed 2x2)
+			// must not abort the fell just because Min_cut_ratio is unmet.
+			tree.skipChopLayerCheck = true;
 			FallingTrees.add(tree);
 			executor.submit(tree);
 			tree.destroyStump = true;
 			tree.stumpOriginalState = fellStumpState;
 			event.setCanceled(true);
-			System.out.println("[ChopDown-DEBUG] both: rigid fell started at " + pos);
+			Config.debugLog("[ChopDown-DEBUG] both: rigid fell started at " + pos);
 		} catch (Exception e) {
 			player.sendMessage(new TextComponentString("Can't find a tree configuration for this log."));
 		}
